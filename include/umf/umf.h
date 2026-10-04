@@ -367,6 +367,43 @@ UMF_API bool umf_dll_watchdog_start(void);
 UMF_API void umf_dll_watchdog_stop(void);
 
 /* ════════════════════════════════════════════════════════════════
+ * §IAT — Import Address Table hooking (data-only; ACG-compatible)
+ *
+ * Overwrites a function pointer in a module's import table instead of
+ * patching code. Works where inline hooks cannot: under ACG (Chromium
+ * renderers), on tiny functions, and on code pages that must stay RX.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    void**  iat_slot;   /* address of the IAT entry (holds the function ptr) */
+    void*   original;   /* original resolved pointer (for "call original")   */
+    bool    is_delay;   /* located in a delay-load IAT                       */
+    HMODULE module;     /* importing module                                  */
+} UmfIatLocation;
+
+/* Locate the IAT slot in `module` importing `dll!func`. Matches by name via
+ * the import-name table, then by the forwarder-resolved address (handles
+ * kernel32→kernelbase forwarding, ApiSets, and bound imports). */
+UMF_API bool umf_find_iat_entry(HMODULE module, const char* dll,
+                                const char* func, UmfIatLocation* out);
+
+/* Overwrite the IAT slot with `hook`. Pointer-sized aligned write is atomic
+ * on x64, so no trampoline and no thread freeze are needed. `out_original`
+ * (optional) receives the pointer to call for the original; `out_loc`
+ * (optional) receives the location for a later umf_unhook_iat(). */
+UMF_API bool umf_hook_iat(HMODULE module, const char* dll, const char* func,
+                          void* hook, void** out_original,
+                          UmfIatLocation* out_loc);
+
+/* Restore an IAT slot previously hooked by umf_hook_iat. */
+UMF_API bool umf_unhook_iat(const UmfIatLocation* loc);
+
+/* Fallback for dynamically-resolved APIs (#4): inline-hook GetProcAddress so
+ * that whenever any module resolves `target_resolved`, `hook` is returned
+ * instead. Requires inline hooking to be available (non-ACG). */
+UMF_API bool umf_install_getprocaddress_hook(void* target_resolved, void* hook);
+
+/* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox
  * ════════════════════════════════════════════════════════════════ */
 

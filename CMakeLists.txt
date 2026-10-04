@@ -34,6 +34,7 @@ add_library(umf_runtime SHARED
     src/core/hooks/umf_hook_batch.c
     src/core/hooks/umf_thread_freezer.c
     src/core/hooks/umf_dll_watchdog.c
+    src/core/hooks/umf_iat.c
 
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
@@ -70,6 +71,7 @@ add_executable(umf_test
     tests/test_log.c
     tests/test_hook_inline.c
     tests/test_dll_watchdog.c
+    tests/test_iat.c
 )
 
 target_include_directories(umf_test PRIVATE

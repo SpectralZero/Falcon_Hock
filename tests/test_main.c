@@ -20,6 +20,7 @@ int main(void) {
     printf("\n[trampoline_pool]\n"); run_trampoline_pool_tests();
     printf("\n[hook_inline]\n");     run_hook_inline_tests();
     printf("\n[dll_watchdog]\n");    run_dll_watchdog_tests();
+    printf("\n[iat]\n");             run_iat_tests();
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);
