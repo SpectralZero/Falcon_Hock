@@ -152,6 +152,58 @@ void umf_rebuild_target_chain(UmfHookTarget* target) {
     ReleaseSRWLockExclusive(&target->chain_lock);
 }
 
+/* Safety net: once a hooked module unloads, mod "call original" pointers are
+ * repointed here so a late call returns 0 instead of jumping into freed code.
+ * Lives in umf_runtime.dll (always loaded), so its address is always valid. */
+static uintptr_t umf_dead_original(void) {
+    return 0;
+}
+
+void umf_registry_on_module_unload(uintptr_t base, uintptr_t size) {
+    uintptr_t end = base + size;
+
+    /* Runs under the loader lock. Keep it allocation-light and never freeze
+     * threads or call Load/FreeLibrary here. */
+    AcquireSRWLockExclusive(&g_registry_lock);
+
+    for (int i = 0; i < g_target_count; i++) {
+        UmfHookTarget* t = &g_targets[i];
+        uintptr_t addr = (uintptr_t)t->resolved_address;
+        if (addr < base || addr >= end) continue;
+        if (t->module_unloaded) continue;
+
+        /* Neutralize "call original" pointers, then drop the chain. */
+        AcquireSRWLockExclusive(&t->chain_lock);
+        UmfHookEntry* e = t->chain_head;
+        while (e) {
+            if (e->user_original_slot)
+                *e->user_original_slot = (void*)&umf_dead_original;
+            UmfHookEntry* next = e->next;
+            free(e);
+            e = next;
+        }
+        t->chain_head = NULL;
+        ReleaseSRWLockExclusive(&t->chain_lock);
+
+        /* Release the trampoline (its jmp-back now targets freed memory).
+         * umf_trampoline_pool_release only flips state — safe here. */
+        if (t->trampoline) {
+            if (t->trampoline->rt_entry) {
+                umf_unregister_unwind_info(t->trampoline->rt_entry);
+                t->trampoline->rt_entry = NULL;
+            }
+            umf_trampoline_pool_release(&g_trampoline_pool, t->trampoline);
+            t->trampoline = NULL;
+        }
+        t->rt_entry = NULL;
+        t->original_bytes = NULL;         /* was a copy of now-freed prologue */
+        t->original_prologue_size = 0;
+        t->module_unloaded = true;
+    }
+
+    ReleaseSRWLockExclusive(&g_registry_lock);
+}
+
 bool umf_register_hook_ex(const char* dll, const char* func,
                            void* hook_func, int priority, UmfMod* mod,
                            void** original_out) {
@@ -183,6 +235,10 @@ bool umf_register_hook_addr(void* real_addr, const char* name,
             ReleaseSRWLockExclusive(&g_registry_lock);
             return false;
         }
+        target->active_strategy = umf_select_strategy(real_addr, &g_mitigations);
+    } else if (target->module_unloaded) {
+        /* Module reloaded (possibly at the same address) — revive the slot. */
+        target->module_unloaded = false;
         target->active_strategy = umf_select_strategy(real_addr, &g_mitigations);
     }
 

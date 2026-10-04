@@ -299,6 +299,7 @@ struct UmfHookTarget {
     size_t             original_prologue_size;
     uint8_t*           original_bytes;
     bool               deferred_unhook;
+    bool               module_unloaded;  /* owning module was unloaded (dead) */
     UmfRelocMap        reloc_map;        /* src→dst insn map for RIP fixups */
     SRWLOCK            chain_lock;
 };
@@ -340,6 +341,13 @@ UMF_API void           umf_rebuild_target_chain(UmfHookTarget* target);
 UMF_API UmfHookStrategy umf_select_strategy(void* addr,
                                             const UmfMitigationStatus* m);
 
+/* Tear down every hook target whose code lives in [base, base+size).
+ * Called by the DLL watchdog when a module is unloaded: releases the
+ * trampoline, drops the chain, and repoints mod "call original" pointers
+ * to a safe stub so a late call returns 0 instead of faulting. */
+UMF_API void           umf_registry_on_module_unload(uintptr_t base,
+                                                      uintptr_t size);
+
 /* Batch */
 UMF_API void umf_queue_hook_enable(UmfHookTarget* target);
 UMF_API void umf_queue_hook_disable(UmfHookTarget* target);
@@ -350,6 +358,13 @@ UMF_API bool umf_apply_pending_batch(void);
  * ════════════════════════════════════════════════════════════════ */
 
 UMF_API void* umf_resolve_function(const char* dll, const char* func);
+
+/* ════════════════════════════════════════════════════════════════
+ * §WATCHDOG — DLL load/unload notifications (crash-safe hook teardown)
+ * ════════════════════════════════════════════════════════════════ */
+
+UMF_API bool umf_dll_watchdog_start(void);
+UMF_API void umf_dll_watchdog_stop(void);
 
 /* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox

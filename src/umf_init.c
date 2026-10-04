@@ -46,6 +46,9 @@ bool umf_init(void) {
     umf_trampoline_pool_init(&g_trampoline_pool);
     umf_hook_registry_init();
 
+    /* 5. Watch for module unloads so hooks never jump into freed code */
+    umf_dll_watchdog_start();
+
     g_umf_initialized = true;
     UMF_INFO("UMF initialized successfully");
     return true;
@@ -55,6 +58,7 @@ void umf_shutdown(void) {
     if (!g_umf_initialized) return;
 
     UMF_INFO("UMF shutting down...");
+    umf_dll_watchdog_stop();
     umf_trampoline_pool_destroy(&g_trampoline_pool);
     g_umf_initialized = false;
     UMF_INFO("UMF shutdown complete");

@@ -33,6 +33,7 @@ add_library(umf_runtime SHARED
     src/core/hooks/umf_hook_registry.c
     src/core/hooks/umf_hook_batch.c
     src/core/hooks/umf_thread_freezer.c
+    src/core/hooks/umf_dll_watchdog.c
 
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
@@ -68,6 +69,7 @@ add_executable(umf_test
     tests/test_trampoline_pool.c
     tests/test_log.c
     tests/test_hook_inline.c
+    tests/test_dll_watchdog.c
 )
 
 target_include_directories(umf_test PRIVATE
@@ -76,6 +78,10 @@ target_include_directories(umf_test PRIVATE
 )
 
 target_link_libraries(umf_test PRIVATE umf_runtime)
+
+# ── Test plugin DLL (loaded + unloaded by the watchdog test) ──
+add_library(umf_test_plugin SHARED tests/plugin/test_plugin.c)
+add_dependencies(umf_test umf_test_plugin)
 
 # ── Install ──
 install(TARGETS umf_runtime RUNTIME DESTINATION bin)
