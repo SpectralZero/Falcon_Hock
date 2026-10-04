@@ -1,0 +1,9 @@
+{
+  "name": "umf",
+  "version": "0.1.0",
+  "description": "UniversalModFramework — Hook any native Windows application",
+  "dependencies": [
+    "zydis",
+    "lua"
+  ]
+}

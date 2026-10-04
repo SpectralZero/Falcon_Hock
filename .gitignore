@@ -1,0 +1,27 @@
+# ── Build output ──
+/build/
+/out/
+/cmake-build-*/
+
+# ── vcpkg ──
+/vcpkg_installed/
+vcpkg_installed/
+
+# ── Visual Studio / MSVC ──
+.vs/
+*.user
+*.suo
+*.aps
+*.pdb
+*.ilk
+*.obj
+*.exp
+*.idb
+
+# ── Runtime artifacts ──
+*.log
+
+# ── OS cruft ──
+Thumbs.db
+Desktop.ini
+.DS_Store
