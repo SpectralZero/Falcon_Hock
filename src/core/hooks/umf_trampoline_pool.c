@@ -21,6 +21,15 @@
 void umf_trampoline_pool_init(UmfTrampolinePool* pool) {
     memset(pool, 0, sizeof(*pool));
     InitializeSRWLock(&pool->lock);
+
+    /* Slot isolation relies on one page per slot. On x64 Windows the page
+     * size is always 4 KiB; warn loudly if that assumption is ever broken. */
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    if (si.dwPageSize != UMF_TRAMPOLINE_SLOT_SIZE) {
+        UMF_WARN("Page size %lu != slot size %d — trampoline slot isolation "
+                 "may be imperfect", si.dwPageSize, UMF_TRAMPOLINE_SLOT_SIZE);
+    }
 }
 
 void umf_trampoline_pool_destroy(UmfTrampolinePool* pool) {
@@ -128,7 +137,7 @@ UmfTrampolineSlot* umf_trampoline_pool_allocate_near(
                 blk->base_address = alloc;
                 blk->total_slots  = UMF_SLOTS_PER_BLOCK;
 
-                /* Initialize all slots */
+                /* Initialize all slots (one 4KB page each). */
                 for (size_t s = 0; s < blk->total_slots; s++) {
                     blk->slots[s].code = (uint8_t*)alloc +
                                          (s * UMF_TRAMPOLINE_SLOT_SIZE);
@@ -137,17 +146,16 @@ UmfTrampolineSlot* umf_trampoline_pool_allocate_near(
                     blk->slots[s].rt_entry = NULL;
                 }
 
-                /* First slot is active (for the caller) */
+                /* First slot is handed to the caller (page already RW). */
                 blk->slots[0].state = UMF_SLOT_ACTIVE;
-                /* Page is already RW from VirtualAlloc */
 
-                /* Mark remaining slots as NOACCESS for fail-loud */
+                /* Remaining slots → NOACCESS (fail-loud). Safe now that each
+                 * slot owns a full page: this does not disturb slot 0. */
                 for (size_t s = 1; s < blk->total_slots; s++) {
-                    /* Only flip if the slot is on a different page boundary
-                     * — VirtualProtect operates on full pages. Since all
-                     * slots share the same 64KB region and it was allocated
-                     * as RW, we skip individual slot protection for now.
-                     * The real protection transition happens in finalize. */
+                    DWORD old;
+                    VirtualProtect(blk->slots[s].code,
+                                   UMF_TRAMPOLINE_SLOT_SIZE,
+                                   PAGE_NOACCESS, &old);
                 }
 
                 /* Link into pool (prepend to head — O(1)) */

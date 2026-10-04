@@ -56,12 +56,18 @@ extern "C" {
 
 /* ────────────────────────────────────────────────────────────────
  * Trampoline Pool Constants
+ *
+ * Tier-1 #3 fix: each slot occupies its own 4 KiB page. VirtualProtect
+ * is page-granular, so packing many slots per page meant one slot's
+ * RW→RX (finalize) or →NOACCESS (GC) silently changed the protection of
+ * every sibling slot on that page. Giving each slot a full page makes
+ * every protection transition affect exactly one trampoline.
  * ──────────────────────────────────────────────────────────────── */
 #define UMF_TRAMPOLINE_SEARCH_RANGE  (1024ULL * 1024 * 1024)  /* ±1GB */
-#define UMF_TRAMPOLINE_BLOCK_SIZE    (64 * 1024)               /* 64KB granularity */
-#define UMF_TRAMPOLINE_SLOT_SIZE     96                        /* Per-slot bytes   */
+#define UMF_TRAMPOLINE_BLOCK_SIZE    (64 * 1024)               /* 64KB alloc granularity */
+#define UMF_TRAMPOLINE_SLOT_SIZE     4096                      /* One page per slot      */
 #define UMF_SLOTS_PER_BLOCK \
-    (UMF_TRAMPOLINE_BLOCK_SIZE / UMF_TRAMPOLINE_SLOT_SIZE)
+    (UMF_TRAMPOLINE_BLOCK_SIZE / UMF_TRAMPOLINE_SLOT_SIZE)     /* = 16 slots / block     */
 
 /* ════════════════════════════════════════════════════════════════
  * §LOG — Logging
