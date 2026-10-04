@@ -27,5 +27,7 @@ void run_trampoline_pool_tests(void);
 void run_hook_inline_tests(void);
 void run_dll_watchdog_tests(void);
 void run_iat_tests(void);
+void run_vtable_tests(void);
+void run_eat_tests(void);
 
 #endif /* UMF_TEST_FRAMEWORK_H */

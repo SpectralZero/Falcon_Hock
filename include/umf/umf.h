@@ -404,6 +404,46 @@ UMF_API bool umf_unhook_iat(const UmfIatLocation* loc);
 UMF_API bool umf_install_getprocaddress_hook(void* target_resolved, void* hook);
 
 /* ════════════════════════════════════════════════════════════════
+ * §VTABLE — C++ virtual method hooking (data-only)
+ *
+ * Swaps a function pointer in a vtable. Class-wide (affects all instances
+ * sharing the vtable). The hook receives the object as its first argument
+ * (x64: in RCX) exactly as the virtual method would.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    void** vtable;      /* the vtable array        */
+    int    index;       /* slot index that was hooked */
+    void*  original;    /* saved original pointer  */
+} UmfVtableLocation;
+
+UMF_API bool umf_hook_vtable(void** vtable, int index, void* hook,
+                             void** out_original, UmfVtableLocation* out_loc);
+UMF_API bool umf_hook_vtable_object(void* object, int index, void* hook,
+                                    void** out_original, UmfVtableLocation* out_loc);
+UMF_API bool umf_unhook_vtable(const UmfVtableLocation* loc);
+
+/* ════════════════════════════════════════════════════════════════
+ * §EAT — Export Address Table hooking (data-only)
+ *
+ * Rewrites an export's 32-bit RVA so future GetProcAddress-style
+ * resolutions of that export return the hook. For self-resolving plugins
+ * and exported DLLs that bypass the importer's IAT. When the hook lies
+ * beyond the module's 4 GiB RVA window, an above-base jump stub is placed.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    HMODULE module;
+    DWORD*  eat_slot;      /* address of the DWORD RVA in the EAT */
+    DWORD   original_rva;  /* saved RVA                           */
+    void*   stub;          /* above-base jmp stub, or NULL        */
+} UmfEatLocation;
+
+UMF_API bool umf_hook_eat(HMODULE module, const char* func, void* hook,
+                          void** out_original, UmfEatLocation* out_loc);
+UMF_API bool umf_unhook_eat(const UmfEatLocation* loc);
+
+/* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox
  * ════════════════════════════════════════════════════════════════ */
 

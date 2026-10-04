@@ -21,6 +21,8 @@ int main(void) {
     printf("\n[hook_inline]\n");     run_hook_inline_tests();
     printf("\n[dll_watchdog]\n");    run_dll_watchdog_tests();
     printf("\n[iat]\n");             run_iat_tests();
+    printf("\n[vtable]\n");          run_vtable_tests();
+    printf("\n[eat]\n");             run_eat_tests();
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);
