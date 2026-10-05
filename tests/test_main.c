@@ -24,6 +24,7 @@ int main(void) {
     printf("\n[vtable]\n");          run_vtable_tests();
     printf("\n[eat]\n");             run_eat_tests();
     printf("\n[hwbp]\n");            run_hwbp_tests();
+    printf("\n[mod_loader]\n");      run_mod_loader_tests();
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

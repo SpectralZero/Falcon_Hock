@@ -277,6 +277,20 @@ typedef struct UmfHookEntry  UmfHookEntry;
 typedef struct UmfHookTarget UmfHookTarget;
 typedef struct UmfMod        UmfMod;
 
+/* Mod kind + capability flags (see §MOD) */
+typedef enum {
+    UMF_MOD_NATIVE = 0,   /* a DLL exporting umf_mod_init/umf_mod_shutdown */
+    UMF_MOD_LUA,          /* a sandboxed Lua script                       */
+} UmfModType;
+
+typedef enum {
+    UMF_CAP_HOOK       = 0x01,   /* may install hooks            */
+    UMF_CAP_READ_MEM   = 0x02,   /* may read target memory       */
+    UMF_CAP_WRITE_MEM  = 0x04,   /* may write target memory      */
+    UMF_CAP_OVERLAY    = 0x08,   /* may draw an overlay          */
+    UMF_CAP_FILE_IO    = 0x10,   /* may touch the filesystem     */
+} UmfCapability;
+
 struct UmfHookEntry {
     void*             hook_func;        /* User's hook function            */
     void*             original_func;    /* Trampoline or next hook in chain */
@@ -305,9 +319,14 @@ struct UmfHookTarget {
 };
 
 struct UmfMod {
-    char    name[128];
-    HMODULE module_handle;
-    bool    active;
+    char       name[128];
+    HMODULE    module_handle;
+    bool       active;
+    UmfModType type;
+    uint32_t   capabilities;   /* bitmask of UmfCapability           */
+    void*      lua_state;      /* struct lua_State* for Lua mods      */
+    char       version[32];
+    int        priority;
 };
 
 /* Registry */
@@ -465,6 +484,48 @@ typedef struct {
 UMF_API bool umf_hook_hwbp(void* target, void* hook, UmfHwbpLocation* out_loc);
 UMF_API bool umf_unhook_hwbp(const UmfHwbpLocation* loc);
 UMF_API void umf_hwbp_enter_original(void);  /* arm a one-shot pass-through */
+
+/* ════════════════════════════════════════════════════════════════
+ * §MOD — Mod manifest + loader
+ *
+ * A mod is described by a mod.json manifest and loaded from its directory.
+ * Native mods are DLLs exporting:
+ *     bool umf_mod_init(UmfMod* self);      // return true on success
+ *     void umf_mod_shutdown(UmfMod* self);  // optional
+ * The mod calls the umf_* API directly (it imports umf_runtime). Declared
+ * capabilities gate privileged operations (e.g. hook installation).
+ * ════════════════════════════════════════════════════════════════ */
+
+#define UMF_MOD_MAX_DEPS 16
+
+typedef struct {
+    char       name[128];
+    char       version[32];
+    UmfModType type;
+    char       entry[260];                 /* DLL or .lua filename        */
+    int        priority;
+    char       deps[UMF_MOD_MAX_DEPS][128]; /* dependency mod names        */
+    int        dep_count;
+    uint32_t   capabilities;               /* parsed capability bitmask   */
+} UmfModManifest;
+
+typedef bool (*UmfModInitFn)(UmfMod* self);
+typedef void (*UmfModShutdownFn)(UmfMod* self);
+
+/* Manifest parsing */
+UMF_API bool umf_parse_manifest_string(const char* json, UmfModManifest* out);
+UMF_API bool umf_parse_manifest_file(const char* path, UmfModManifest* out);
+
+/* Order `n` manifests so dependencies precede dependents (DFS post-order).
+ * Writes n indices to out_order; returns false on a dependency cycle. */
+UMF_API bool umf_mod_topo_sort(const UmfModManifest* mods, int n, int* out_order);
+
+/* Loading */
+UMF_API bool    umf_mod_load(const char* manifest_path);   /* one mod       */
+UMF_API int     umf_mod_load_dir(const char* mods_dir);    /* scan + order  */
+UMF_API void    umf_mod_unload_all(void);
+UMF_API UmfMod* umf_mod_find(const char* name);
+UMF_API int     umf_mod_count(void);
 
 /* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox

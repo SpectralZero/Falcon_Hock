@@ -221,6 +221,14 @@ bool umf_register_hook_addr(void* real_addr, const char* name,
                              void** original_out) {
     if (!real_addr || !hook_func) return false;
 
+    /* Capability gate: a named mod must hold UMF_CAP_HOOK. An anonymous
+     * (NULL) owner is engine-internal and trusted. */
+    if (mod && !(mod->capabilities & UMF_CAP_HOOK)) {
+        UMF_WARN("Mod '%s' lacks 'hook' capability — denying hook on %p",
+                 mod->name, real_addr);
+        return false;
+    }
+
     UMF_INFO("Registering hook @ %p '%s' (priority %d, mod '%s')",
              real_addr, name ? name : "<anon>", priority,
              mod ? mod->name : "<anonymous>");

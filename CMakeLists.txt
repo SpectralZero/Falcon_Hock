@@ -42,6 +42,10 @@ add_library(umf_runtime SHARED
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
 
+    # Mods
+    src/mods/umf_manifest.c
+    src/mods/umf_mod_loader.c
+
     # Entry point
     src/umf_init.c
 )
@@ -78,6 +82,7 @@ add_executable(umf_test
     tests/test_vtable.c
     tests/test_eat.c
     tests/test_hwbp.c
+    tests/test_mod_loader.c
 )
 
 target_include_directories(umf_test PRIVATE
@@ -90,6 +95,12 @@ target_link_libraries(umf_test PRIVATE umf_runtime)
 # ── Test plugin DLL (loaded + unloaded by the watchdog test) ──
 add_library(umf_test_plugin SHARED tests/plugin/test_plugin.c)
 add_dependencies(umf_test umf_test_plugin)
+
+# ── Native test mod DLL (loaded by the mod-loader test) ──
+add_library(umf_test_mod_native SHARED tests/mod_native/native_mod.c)
+target_include_directories(umf_test_mod_native PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(umf_test_mod_native PRIVATE umf_runtime)
+add_dependencies(umf_test umf_test_mod_native)
 
 # ── Install ──
 install(TARGETS umf_runtime RUNTIME DESTINATION bin)
