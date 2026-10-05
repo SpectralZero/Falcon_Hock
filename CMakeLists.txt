@@ -37,6 +37,7 @@ add_library(umf_runtime SHARED
     src/core/hooks/umf_iat.c
     src/core/hooks/umf_vtable.c
     src/core/hooks/umf_eat.c
+    src/core/hooks/umf_hwbp.c
 
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
@@ -76,6 +77,7 @@ add_executable(umf_test
     tests/test_iat.c
     tests/test_vtable.c
     tests/test_eat.c
+    tests/test_hwbp.c
 )
 
 target_include_directories(umf_test PRIVATE

@@ -444,6 +444,29 @@ UMF_API bool umf_hook_eat(HMODULE module, const char* func, void* hook,
 UMF_API bool umf_unhook_eat(const UmfEatLocation* loc);
 
 /* ════════════════════════════════════════════════════════════════
+ * §HWBP — Hardware-breakpoint hooking (no memory writes at all)
+ *
+ * Uses the x86-64 debug registers (Dr0–Dr3) + a vectored exception
+ * handler. Nothing in the target is modified, so this is the only
+ * strategy that works under HVCI+ACG when no IAT/EAT slot exists.
+ * Limited to 4 simultaneous breakpoints and applied per-thread.
+ *
+ * Calling the original: a hooked function invokes the original by first
+ * calling umf_hwbp_enter_original() and then calling the target through a
+ * function pointer. The handler lets that one re-entry pass through using
+ * the CPU Resume Flag, so no trampoline or code edit is required.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    int   slot;        /* debug-register index 0..3 */
+    void* target;      /* breakpoint address        */
+} UmfHwbpLocation;
+
+UMF_API bool umf_hook_hwbp(void* target, void* hook, UmfHwbpLocation* out_loc);
+UMF_API bool umf_unhook_hwbp(const UmfHwbpLocation* loc);
+UMF_API void umf_hwbp_enter_original(void);  /* arm a one-shot pass-through */
+
+/* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox
  * ════════════════════════════════════════════════════════════════ */
 
