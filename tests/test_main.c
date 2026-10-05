@@ -26,6 +26,7 @@ int main(void) {
     printf("\n[hwbp]\n");            run_hwbp_tests();
     printf("\n[mod_loader]\n");      run_mod_loader_tests();
     printf("\n[lua_hook]\n");        run_lua_hook_tests();
+    printf("\n[xfg]\n");             run_xfg_tests();
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

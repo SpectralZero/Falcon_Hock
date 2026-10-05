@@ -177,6 +177,19 @@ static bool prepare_hook(UmfHookTarget* target, PreparedHook* out) {
             return false;
         }
 
+        /* XFG: a /guard:xfg target's indirect calls verify a type hash at
+         * the callee's -8 slot. We cannot guarantee our hook carries it, so
+         * refuse the inline hook rather than fault (use IAT/EAT/vtable). */
+        HMODULE owner = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)target->resolved_address, &owner) &&
+            owner && umf_module_has_xfg(owner)) {
+            UMF_WARN("Target %s is in an XFG module — refusing inline hook; "
+                     "use IAT/EAT/vtable/hwbp", target->canonical_name);
+            return false;
+        }
+
         /* 1. Allocate a trampoline slot. */
         out->trampoline = umf_trampoline_pool_allocate_near(
             &g_trampoline_pool, target->resolved_address,

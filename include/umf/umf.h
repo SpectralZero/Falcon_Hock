@@ -486,6 +486,24 @@ UMF_API bool umf_unhook_hwbp(const UmfHwbpLocation* loc);
 UMF_API void umf_hwbp_enter_original(void);  /* arm a one-shot pass-through */
 
 /* ════════════════════════════════════════════════════════════════
+ * §XFG — eXtended Flow Guard detection + hash handling
+ *
+ * /guard:xfg modules store a type hash in the 8 bytes preceding each valid
+ * indirect-call target and verify it at the call site. Detection uses the
+ * real PE loader-config GuardFlags bit (IMAGE_GUARD_XFG_ENABLED), not a
+ * heuristic. Inline-hooking an XFG target is only safe if the hook carries
+ * a matching hash slot; when it cannot be guaranteed the engine refuses the
+ * inline hook rather than risk a control-flow-protection fault.
+ * ════════════════════════════════════════════════════════════════ */
+
+UMF_API bool umf_module_has_xfg(HMODULE module);
+
+/* Copy the 8-byte XFG hash preceding `target` onto the slot preceding `hook`.
+ * Fails (and writes nothing) if that slot would cross a page boundary.
+ * *out_did is set true only when a hash was actually written. */
+UMF_API bool umf_xfg_copy_hash(void* target, void* hook, bool* out_did);
+
+/* ════════════════════════════════════════════════════════════════
  * §MOD — Mod manifest + loader
  *
  * A mod is described by a mod.json manifest and loaded from its directory.
