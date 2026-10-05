@@ -41,6 +41,7 @@ add_library(umf_runtime SHARED
 
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
+    src/sandbox/umf_lua_hook.c
 
     # Mods
     src/mods/umf_manifest.c
@@ -83,14 +84,16 @@ add_executable(umf_test
     tests/test_eat.c
     tests/test_hwbp.c
     tests/test_mod_loader.c
+    tests/test_lua_hook.c
 )
 
 target_include_directories(umf_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/tests
+    ${LUA_INCLUDE_DIR}
 )
 
-target_link_libraries(umf_test PRIVATE umf_runtime)
+target_link_libraries(umf_test PRIVATE umf_runtime ${LUA_LIBRARIES})
 
 # ── Test plugin DLL (loaded + unloaded by the watchdog test) ──
 add_library(umf_test_plugin SHARED tests/plugin/test_plugin.c)

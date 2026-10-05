@@ -540,6 +540,13 @@ UMF_API int               umf_lua_sandboxed_pcall(struct lua_State* L,
                                                    int nargs, int nresults,
                                                    int errfunc);
 
+/* Install the `umf` Lua module (umf.hook / umf.log / umf.call_original /
+ * umf.resolve) bound to `mod` (for capability checks; NULL = trusted). */
+UMF_API void umf_lua_setup_api(struct lua_State* L, UmfMod* mod);
+
+/* Compile and run a Lua chunk. Returns true on success. */
+UMF_API bool umf_lua_run_string(struct lua_State* L, const char* chunk);
+
 /* ════════════════════════════════════════════════════════════════
  * §INIT — Framework lifecycle
  * ════════════════════════════════════════════════════════════════ */

@@ -31,5 +31,6 @@ void run_vtable_tests(void);
 void run_eat_tests(void);
 void run_hwbp_tests(void);
 void run_mod_loader_tests(void);
+void run_lua_hook_tests(void);
 
 #endif /* UMF_TEST_FRAMEWORK_H */
