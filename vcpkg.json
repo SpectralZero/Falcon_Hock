@@ -5,13 +5,23 @@
   "builtin-baseline": "19780d9cdf84d0944cf9a318666703b89ab6629c",
   "dependencies": [
     "zydis",
-    "lua",
+    {
+      "name": "lua",
+      "version>=": "5.4.8"
+    },
     {
       "name": "imgui",
       "features": [
         "dx11-binding",
         "win32-binding"
       ]
+    }
+  ],
+  "overrides": [
+    {
+      "name": "lua",
+      "version": "5.4.8",
+      "port-version": 0
     }
   ]
 }
