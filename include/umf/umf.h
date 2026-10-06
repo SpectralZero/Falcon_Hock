@@ -504,6 +504,55 @@ UMF_API bool umf_module_has_xfg(HMODULE module);
 UMF_API bool umf_xfg_copy_hash(void* target, void* hook, bool* out_did);
 
 /* ════════════════════════════════════════════════════════════════
+ * §AOB — Array-of-bytes (byte-pattern) scanning
+ *
+ * Finds code/data by byte signature instead of a fixed address, so mods
+ * survive module rebuilds (the technique trainers and CE tables rely on).
+ * Pattern syntax: whitespace-separated tokens of 1–2 nibbles with '?'/'x'
+ * wildcards. Examples:
+ *     "48 8B ?? 89 05"   full-byte wildcard
+ *     "4? ?F"            nibble wildcards
+ *     "E9 ?? ?? ?? ??"   near jmp
+ * ════════════════════════════════════════════════════════════════ */
+
+/* First match in `module_name` (NULL or "" = main executable). */
+UMF_API void* umf_aob_scan(const char* pattern, const char* module_name);
+
+/* First match within an explicit [start, start+size) region. */
+UMF_API void* umf_aob_scan_range(const char* pattern,
+                                 const void* start, size_t size);
+
+/* Collect up to `max` matches from `module_name`. Returns the count. */
+UMF_API int   umf_aob_scan_all(const char* pattern, const char* module_name,
+                               void** out, int max);
+
+/* ════════════════════════════════════════════════════════════════
+ * §OVERLAY — In-target Dear ImGui DX11 overlay
+ *
+ * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the
+ * swapchain's Present/ResizeBuffers (vtable) and the window procedure.
+ * swapchain/hwnd are passed as opaque void* to keep d3d/dxgi out of this
+ * header; pass IDXGISwapChain* and HWND.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef void (*UmfOverlayFrameFn)(void);
+
+UMF_API bool umf_overlay_dx11_init(void* swapchain, void* hwnd);
+UMF_API void umf_overlay_dx11_shutdown(void);
+UMF_API void umf_overlay_set_frame_callback(UmfOverlayFrameFn fn);
+UMF_API void umf_overlay_block_input(bool block);   /* 1 = ImGui captures input */
+UMF_API bool umf_overlay_is_active(void);
+UMF_API void umf_overlay_apply_modern_theme(void);
+
+/* Minimal draw helpers so callers never touch ImGui directly (ImGui's context
+ * is a per-module global; with a static DLL-linked ImGui, out-of-module ImGui
+ * calls would see a null context). The frame callback runs inside the runtime,
+ * so these are safe to call from it. */
+UMF_API void umf_imgui_begin(const char* title);
+UMF_API void umf_imgui_text(const char* text);
+UMF_API void umf_imgui_end(void);
+
+/* ════════════════════════════════════════════════════════════════
  * §MOD — Mod manifest + loader
  *
  * A mod is described by a mod.json manifest and loaded from its directory.
