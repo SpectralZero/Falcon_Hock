@@ -527,6 +527,39 @@ UMF_API int   umf_aob_scan_all(const char* pattern, const char* module_name,
                                void** out, int max);
 
 /* ════════════════════════════════════════════════════════════════
+ * §MEM — Capability-gated memory access + region enumeration
+ *
+ * The scanner, trainers, and CE-table importer build on this. Reads/writes
+ * are fault-guarded (an unmapped address returns false, never crashes) and
+ * gated by the active mod's capabilities: when an owner is set with
+ * umf_mem_set_owner(), reads require UMF_CAP_READ_MEM and writes require
+ * UMF_CAP_WRITE_MEM. A NULL owner (engine/tests) is trusted.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    uintptr_t base;      /* region base address           */
+    size_t    size;      /* region size in bytes          */
+    uint32_t  protect;   /* PAGE_* protection             */
+    uint32_t  state;     /* MEM_COMMIT / MEM_FREE / ...   */
+    uint32_t  type;      /* MEM_IMAGE / MEM_MAPPED / ...  */
+} UmfMemRegion;
+
+/* Set the mod whose capabilities gate memory access (NULL = trusted). */
+UMF_API void umf_mem_set_owner(UmfMod* mod);
+
+/* Fault-guarded read/write. Return false on access violation or on a
+ * capability denial. Write temporarily makes the page(s) writable. */
+UMF_API bool umf_mem_read(const void* addr, void* out, size_t size);
+UMF_API bool umf_mem_write(void* addr, const void* in, size_t size);
+
+/* Enumerate committed regions into `out` (up to `max`). Returns the count. */
+UMF_API int  umf_mem_enum_regions(UmfMemRegion* out, int max);
+
+/* Find the region containing `addr` (committed or not). Returns false if the
+ * address is not mapped at all. */
+UMF_API bool umf_mem_query(const void* addr, UmfMemRegion* out);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the

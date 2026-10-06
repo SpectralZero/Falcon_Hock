@@ -54,6 +54,7 @@ add_library(umf_runtime SHARED
 
     # Memory tools
     src/mem/umf_aob.c
+    src/mem/umf_mem.c
 
     # Entry point
     src/umf_init.c
@@ -98,6 +99,7 @@ add_executable(umf_test
     tests/test_xfg.c
     tests/test_overlay_dx11.cpp
     tests/test_aob.c
+    tests/test_mem.c
 )
 
 target_include_directories(umf_test PRIVATE
