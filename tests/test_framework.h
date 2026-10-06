@@ -39,6 +39,7 @@ void run_lua_hook_tests(void);
 void run_xfg_tests(void);
 void run_overlay_dx11_tests(void);
 void run_aob_tests(void);
+void run_mem_tests(void);
 
 #ifdef __cplusplus
 }
