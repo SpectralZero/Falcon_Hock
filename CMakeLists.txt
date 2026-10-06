@@ -52,6 +52,9 @@ add_library(umf_runtime SHARED
     # Overlay (C++ / Dear ImGui DX11)
     src/overlay/umf_overlay_dx11.cpp
 
+    # Memory tools
+    src/mem/umf_aob.c
+
     # Entry point
     src/umf_init.c
 )
@@ -94,6 +97,7 @@ add_executable(umf_test
     tests/test_lua_hook.c
     tests/test_xfg.c
     tests/test_overlay_dx11.cpp
+    tests/test_aob.c
 )
 
 target_include_directories(umf_test PRIVATE

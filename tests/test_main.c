@@ -37,6 +37,7 @@ int main(void) {
     if (want("lua_hook"))        { printf("\n[lua_hook]\n");        run_lua_hook_tests(); }
     if (want("xfg"))             { printf("\n[xfg]\n");             run_xfg_tests(); }
     if (want("overlay_dx11"))    { printf("\n[overlay_dx11]\n");    run_overlay_dx11_tests(); }
+    if (want("aob"))             { printf("\n[aob]\n");             run_aob_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);
