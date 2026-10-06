@@ -4,6 +4,13 @@
   "description": "UniversalModFramework — Hook any native Windows application",
   "dependencies": [
     "zydis",
-    "lua"
+    "lua",
+    {
+      "name": "imgui",
+      "features": [
+        "dx11-binding",
+        "win32-binding"
+      ]
+    }
   ]
 }

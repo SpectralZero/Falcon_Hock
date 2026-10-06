@@ -16,6 +16,7 @@ add_definitions(-DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX)
 # ── Dependencies (vcpkg) ──
 find_package(Zydis CONFIG REQUIRED)
 find_package(Lua REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 
 # ── UMF Runtime (DLL injected into target) ──
 add_library(umf_runtime SHARED
@@ -48,6 +49,9 @@ add_library(umf_runtime SHARED
     src/mods/umf_manifest.c
     src/mods/umf_mod_loader.c
 
+    # Overlay (C++ / Dear ImGui DX11)
+    src/overlay/umf_overlay_dx11.cpp
+
     # Entry point
     src/umf_init.c
 )
@@ -60,6 +64,8 @@ target_include_directories(umf_runtime PRIVATE
 target_link_libraries(umf_runtime PRIVATE
     Zydis::Zydis
     ${LUA_LIBRARIES}
+    imgui::imgui
+    d3d11 dxgi
     ntdll          # NtQuerySystemInformation
     dbghelp        # Symbol resolution (future)
 )
@@ -87,6 +93,7 @@ add_executable(umf_test
     tests/test_mod_loader.c
     tests/test_lua_hook.c
     tests/test_xfg.c
+    tests/test_overlay_dx11.cpp
 )
 
 target_include_directories(umf_test PRIVATE
@@ -95,7 +102,7 @@ target_include_directories(umf_test PRIVATE
     ${LUA_INCLUDE_DIR}
 )
 
-target_link_libraries(umf_test PRIVATE umf_runtime ${LUA_LIBRARIES})
+target_link_libraries(umf_test PRIVATE umf_runtime ${LUA_LIBRARIES} d3d11 dxgi)
 
 # ── Test plugin DLL (loaded + unloaded by the watchdog test) ──
 add_library(umf_test_plugin SHARED tests/plugin/test_plugin.c)

@@ -7,26 +7,36 @@
 int g_checks_run = 0;
 int g_checks_failed = 0;
 
+/* Suite selection: set UMF_TEST_ONLY=<name> to run one suite (debugging). */
+static int want(const char* name) {
+    const char* only = getenv("UMF_TEST_ONLY");
+    return !only || _stricmp(only, name) == 0;
+}
+
 int main(void) {
     umf_log_init(NULL);
     umf_log_set_level(UMF_LOG_WARN);   /* keep test output readable */
+
+    /* Unbuffered stdout so a crash doesn't hide the last line. */
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("====================================\n");
     printf(" UMF test suite (v%s)\n", UMF_VERSION_STRING);
     printf("====================================\n");
 
-    printf("\n[log]\n");             run_log_tests();
-    printf("\n[mitigations]\n");     run_mitigation_tests();
-    printf("\n[trampoline_pool]\n"); run_trampoline_pool_tests();
-    printf("\n[hook_inline]\n");     run_hook_inline_tests();
-    printf("\n[dll_watchdog]\n");    run_dll_watchdog_tests();
-    printf("\n[iat]\n");             run_iat_tests();
-    printf("\n[vtable]\n");          run_vtable_tests();
-    printf("\n[eat]\n");             run_eat_tests();
-    printf("\n[hwbp]\n");            run_hwbp_tests();
-    printf("\n[mod_loader]\n");      run_mod_loader_tests();
-    printf("\n[lua_hook]\n");        run_lua_hook_tests();
-    printf("\n[xfg]\n");             run_xfg_tests();
+    if (want("log"))             { printf("\n[log]\n");             run_log_tests(); }
+    if (want("mitigations"))     { printf("\n[mitigations]\n");     run_mitigation_tests(); }
+    if (want("trampoline_pool")) { printf("\n[trampoline_pool]\n"); run_trampoline_pool_tests(); }
+    if (want("hook_inline"))     { printf("\n[hook_inline]\n");     run_hook_inline_tests(); }
+    if (want("dll_watchdog"))    { printf("\n[dll_watchdog]\n");    run_dll_watchdog_tests(); }
+    if (want("iat"))             { printf("\n[iat]\n");             run_iat_tests(); }
+    if (want("vtable"))          { printf("\n[vtable]\n");          run_vtable_tests(); }
+    if (want("eat"))             { printf("\n[eat]\n");             run_eat_tests(); }
+    if (want("hwbp"))            { printf("\n[hwbp]\n");            run_hwbp_tests(); }
+    if (want("mod_loader"))      { printf("\n[mod_loader]\n");      run_mod_loader_tests(); }
+    if (want("lua_hook"))        { printf("\n[lua_hook]\n");        run_lua_hook_tests(); }
+    if (want("xfg"))             { printf("\n[xfg]\n");             run_xfg_tests(); }
+    if (want("overlay_dx11"))    { printf("\n[overlay_dx11]\n");    run_overlay_dx11_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

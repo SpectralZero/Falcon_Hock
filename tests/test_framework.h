@@ -6,6 +6,10 @@
 
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern int g_checks_run;
 extern int g_checks_failed;
 
@@ -33,5 +37,10 @@ void run_hwbp_tests(void);
 void run_mod_loader_tests(void);
 void run_lua_hook_tests(void);
 void run_xfg_tests(void);
+void run_overlay_dx11_tests(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* UMF_TEST_FRAMEWORK_H */
