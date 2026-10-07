@@ -286,3 +286,30 @@ bool umf_register_hook(const char* dll, const char* func,
     return umf_register_hook_ex(dll, func, hook_func, priority, mod, NULL);
 }
 
+int umf_hook_list(UmfHookInfo* out, int max) {
+    if (!out || max <= 0) return 0;
+
+    AcquireSRWLockShared(&g_registry_lock);
+    int count = 0;
+    for (int i = 0; i < g_target_count && count < max; i++) {
+        UmfHookTarget* t = &g_targets[i];
+        if (!t->resolved_address) continue;
+
+        strncpy(out[count].name, t->canonical_name, UMF_MAX_NAME_LEN - 1);
+        out[count].name[UMF_MAX_NAME_LEN - 1] = '\0';
+        out[count].address   = t->resolved_address;
+        out[count].strategy  = (int)t->active_strategy;
+        out[count].installed = (t->trampoline != NULL);
+
+        int chain = 0;
+        AcquireSRWLockShared(&t->chain_lock);
+        for (UmfHookEntry* e = t->chain_head; e; e = e->next) chain++;
+        ReleaseSRWLockShared(&t->chain_lock);
+        out[count].chain_len = chain;
+
+        count++;
+    }
+    ReleaseSRWLockShared(&g_registry_lock);
+    return count;
+}
+

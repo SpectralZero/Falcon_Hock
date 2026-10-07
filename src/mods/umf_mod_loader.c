@@ -87,6 +87,29 @@ int umf_mod_count(void) {
     return n;
 }
 
+int umf_mod_list(UmfModInfo* out, int max) {
+    if (!out || max <= 0) return 0;
+
+    AcquireSRWLockShared(&g_mod_lock);
+    int n = 0;
+    for (int i = 0; i < g_mod_count && n < max; i++) {
+        if (!g_mods[i].used) continue;
+        UmfMod* m = &g_mods[i].mod;
+
+        strncpy(out[n].name, m->name, sizeof(out[n].name) - 1);
+        out[n].name[sizeof(out[n].name) - 1] = '\0';
+        strncpy(out[n].version, m->version, sizeof(out[n].version) - 1);
+        out[n].version[sizeof(out[n].version) - 1] = '\0';
+        out[n].type         = (int)m->type;
+        out[n].capabilities = m->capabilities;
+        out[n].priority     = m->priority;
+        out[n].active       = m->active;
+        n++;
+    }
+    ReleaseSRWLockShared(&g_mod_lock);
+    return n;
+}
+
 /* Directory of a file path (everything up to the last slash), into dst. */
 static void dir_of(const char* path, char* dst, size_t dstlen) {
     strncpy(dst, path, dstlen - 1);

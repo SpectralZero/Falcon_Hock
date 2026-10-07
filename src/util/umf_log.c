@@ -126,6 +126,10 @@ void umf_log_write(UmfLogLevel level, const char* file, int line,
     }
     ReleaseSRWLockExclusive(&g_log_lock);
 
+    /* Stream to IPC subscribers (Studio) if any. Done OUTSIDE the log lock so
+     * a blocking pipe write can never deadlock against file logging. */
+    umf_ipc_on_log((int)level, msg);
+
     /* Fatal = abort */
     if (level == UMF_LOG_FATAL) {
         if (IsDebuggerPresent()) __debugbreak();

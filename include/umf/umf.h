@@ -352,6 +352,16 @@ UMF_API bool           umf_register_hook_addr(void* target_addr,
                                               void* hook_func, int priority,
                                               UmfMod* mod, void** original_out);
 
+/* Enumerate installed hook targets (for the inspector / IPC). */
+typedef struct {
+    char  name[UMF_MAX_NAME_LEN];
+    void* address;
+    int   strategy;     /* UmfHookStrategy */
+    int   chain_len;    /* hooks on this target */
+    bool  installed;    /* trampoline present */
+} UmfHookInfo;
+UMF_API int            umf_hook_list(UmfHookInfo* out, int max);
+
 /* Re-wire each chain entry's original_func to the next hook (or the
  * trampoline for the last entry) and refresh mod "call original" slots. */
 UMF_API void           umf_rebuild_target_chain(UmfHookTarget* target);
@@ -626,6 +636,34 @@ UMF_API int     umf_mod_load_dir(const char* mods_dir);    /* scan + order  */
 UMF_API void    umf_mod_unload_all(void);
 UMF_API UmfMod* umf_mod_find(const char* name);
 UMF_API int     umf_mod_count(void);
+
+/* Enumerate loaded mods (for the manager / IPC). */
+typedef struct {
+    char     name[128];
+    char     version[32];
+    int      type;          /* UmfModType   */
+    uint32_t capabilities;
+    int      priority;
+    bool     active;
+} UmfModInfo;
+UMF_API int     umf_mod_list(UmfModInfo* out, int max);
+
+/* ════════════════════════════════════════════════════════════════
+ * §IPC — JSON-RPC 2.0 server over a named pipe (UMF Studio transport)
+ *
+ * Listens on \\.\pipe\umf-studio-{pid} with newline-delimited JSON-RPC 2.0.
+ * Methods: listHooks, listMods, getMitigations, getProcessInfo, evalLua,
+ * subscribe (log events). The runtime is the server; Studio is the client.
+ * ════════════════════════════════════════════════════════════════ */
+
+UMF_API bool        umf_ipc_start(void);
+UMF_API void        umf_ipc_stop(void);
+UMF_API bool        umf_ipc_is_running(void);
+UMF_API const char* umf_ipc_pipe_name(void);   /* \\.\pipe\umf-studio-{pid} */
+
+/* Called from the logger to stream a line to subscribed IPC clients. Not
+ * part of the public modding surface. */
+UMF_API void        umf_ipc_on_log(int level, const char* msg);
 
 /* ════════════════════════════════════════════════════════════════
  * §LUA — Lua sandbox

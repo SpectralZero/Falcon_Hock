@@ -56,6 +56,9 @@ add_library(umf_runtime SHARED
     src/mem/umf_aob.c
     src/mem/umf_mem.c
 
+    # IPC (Studio transport)
+    src/ipc/umf_ipc.c
+
     # Entry point
     src/umf_init.c
 )
@@ -100,6 +103,7 @@ add_executable(umf_test
     tests/test_overlay_dx11.cpp
     tests/test_aob.c
     tests/test_mem.c
+    tests/test_ipc.c
 )
 
 target_include_directories(umf_test PRIVATE
