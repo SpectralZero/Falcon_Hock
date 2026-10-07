@@ -40,6 +40,7 @@ int main(void) {
     if (want("aob"))             { printf("\n[aob]\n");             run_aob_tests(); }
     if (want("mem"))             { printf("\n[mem]\n");             run_mem_tests(); }
     if (want("ipc"))             { printf("\n[ipc]\n");             run_ipc_tests(); }
+    if (want("scan"))            { printf("\n[scan]\n");           run_scan_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

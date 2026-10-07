@@ -570,6 +570,48 @@ UMF_API int  umf_mem_enum_regions(UmfMemRegion* out, int max);
 UMF_API bool umf_mem_query(const void* addr, UmfMemRegion* out);
 
 /* ════════════════════════════════════════════════════════════════
+ * §SCAN — Value scanner (Cheat-Engine-style first/next scan)
+ *
+ * Scan for a value across committed memory, then narrow the result set as
+ * the value changes. No coding required: find health, freeze it, edit it.
+ * All access is fault-guarded via the §MEM layer and capability-gated.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    UMF_SCAN_I8 = 0,
+    UMF_SCAN_I16,
+    UMF_SCAN_I32,
+    UMF_SCAN_I64,
+    UMF_SCAN_F32,
+    UMF_SCAN_F64,
+} UmfScanType;
+
+typedef enum {
+    UMF_SCAN_EXACT = 0,       /* == */
+    UMF_SCAN_CHANGED,         /* != previous */
+    UMF_SCAN_INCREASED,       /* >  previous */
+    UMF_SCAN_DECREASED,       /* <  previous */
+} UmfScanCompare;
+
+typedef struct UmfScanSession UmfScanSession;
+
+/* Begin a scan for `value` (interpreted per type). Returns a session. */
+UMF_API UmfScanSession* umf_scan_first(UmfScanType type, double value);
+
+/* Narrow the session: keep addresses matching `compare` against `value`. */
+UMF_API int  umf_scan_next(UmfScanSession* s, UmfScanCompare compare,
+                           double value);
+
+/* Copy up to `max` current result addresses. Returns the count. */
+UMF_API int  umf_scan_results(UmfScanSession* s, void** out, int max);
+UMF_API int  umf_scan_count(UmfScanSession* s);
+
+/* Read the current value at result index `i` (false if unreadable). */
+UMF_API bool umf_scan_value_at(UmfScanSession* s, int i, double* out);
+
+UMF_API void umf_scan_free(UmfScanSession* s);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the
