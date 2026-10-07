@@ -44,6 +44,7 @@ int main(void) {
     if (want("ct"))              { printf("\n[ct]\n");             run_ct_tests(); }
     if (want("launch"))          { printf("\n[launch]\n");         run_launch_tests(); }
     if (want("manifest"))        { printf("\n[manifest]\n");       run_manifest_tests(); }
+    if (want("discovery"))       { printf("\n[discovery]\n");      run_discovery_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

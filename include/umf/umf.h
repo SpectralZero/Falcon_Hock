@@ -698,6 +698,65 @@ UMF_API void umf_av_exclusion_command(const char* path,
 UMF_API bool umf_request_av_exclusion(const char* path, bool user_confirmed);
 
 /* ════════════════════════════════════════════════════════════════
+ * §DISCOVERY — RTTI/vtable scanner + symbol resolver
+ *
+ * Analysis tools that turn raw addresses into names. The RTTI reader decodes
+ * the MSVC x64 Complete Object Locator that precedes a C++ vtable to recover
+ * the class name (data-only, fault-guarded). The symbol resolver wraps dbghelp
+ * so addresses map to function names (and names back to addresses) using the
+ * export tables and any available PDBs. Both feed the inspector and Studio.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    void**    vtable;         /* vtable address (first virtual slot)         */
+    void*     col;            /* RTTICompleteObjectLocator address           */
+    uintptr_t image_base;     /* module base recovered from the COL          */
+    char      raw_name[256];  /* decorated type name, e.g. ".?AVFoo@@"       */
+    char      name[256];      /* best-effort readable name, e.g. "ns::Foo"   */
+    int       vfunc_count;    /* virtual functions counted after the vtable  */
+} UmfRttiClass;
+
+/* Resolve the class behind a vtable pointer via MSVC x64 RTTI. Returns false
+ * when the vtable carries no valid Complete Object Locator. */
+UMF_API bool umf_rtti_from_vtable(void** vtable, UmfRttiClass* out);
+
+/* Resolve the class of a polymorphic object (reads the object's vtable ptr). */
+UMF_API bool umf_rtti_from_object(const void* object, UmfRttiClass* out);
+
+/* Scan a module image for vtables carrying RTTI; collect up to `max` classes.
+ * module_name NULL/"" = main executable. Returns the count written. */
+UMF_API int  umf_rtti_scan_module(const char* module_name,
+                                  UmfRttiClass* out, int max);
+
+/* Demangle a decorated RTTI type name (".?AVFoo@@") into a readable form.
+ * Pure/deterministic; writes "" on an unrecognised shape. */
+UMF_API void umf_rtti_demangle(const char* raw, char* out, size_t outlen);
+
+#define UMF_SYM_MAX_NAME 512
+
+typedef struct {
+    char      name[UMF_SYM_MAX_NAME];  /* resolved symbol name (undecorated) */
+    char      module[64];              /* owning module base name            */
+    uintptr_t address;                 /* symbol base address                */
+    uint64_t  displacement;            /* addr - symbol base                 */
+} UmfSymbol;
+
+/* Bring up / tear down the process dbghelp symbol handler. init is reference
+ * counted, so paired init/cleanup calls nest safely. */
+UMF_API bool umf_sym_init(void);
+UMF_API void umf_sym_cleanup(void);
+
+/* Resolve an address to the nearest known symbol. false if none is found. */
+UMF_API bool umf_sym_from_address(const void* addr, UmfSymbol* out);
+
+/* Resolve a symbol name to its address, or 0 if the name is unknown. */
+UMF_API uintptr_t umf_sym_resolve(const char* name);
+
+/* Undecorate an MSVC-decorated symbol name. Returns the length written, or 0
+ * on failure. Thin wrapper over UnDecorateSymbolName (offline/deterministic). */
+UMF_API int  umf_undecorate(const char* decorated, char* out, size_t outlen);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the

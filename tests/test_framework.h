@@ -45,6 +45,7 @@ void run_scan_tests(void);
 void run_ct_tests(void);
 void run_launch_tests(void);
 void run_manifest_tests(void);
+void run_discovery_tests(void);
 
 #ifdef __cplusplus
 }

@@ -62,6 +62,9 @@ add_library(umf_runtime SHARED
     # IPC (Studio transport)
     src/ipc/umf_ipc.c
 
+    # Discovery (RTTI/vtable scanner + symbol resolver)
+    src/discovery/umf_discovery.c
+
     # Entry point
     src/umf_init.c
 )
@@ -111,6 +114,7 @@ add_executable(umf_test
     tests/test_ct.c
     tests/test_manifest.c
     tests/test_launch.c
+    tests/test_discovery.cpp
 )
 
 target_include_directories(umf_test PRIVATE
