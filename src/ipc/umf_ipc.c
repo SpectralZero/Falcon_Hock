@@ -203,9 +203,12 @@ static void handle_request(const char* line) {
             json_escape(mods[i].version, ev, sizeof(ev));
             off += snprintf(res + off, UMF_IPC_MAX_RESP - off,
                 "%s{\"name\":\"%s\",\"version\":\"%s\",\"type\":%d,"
-                "\"caps\":%u,\"priority\":%d,\"active\":%s}",
+                "\"caps\":%u,\"priority\":%d,\"active\":%s,"
+                "\"category\":\"%s\",\"audience\":\"%s\"}",
                 i ? "," : "", en, ev, mods[i].type, mods[i].capabilities,
-                mods[i].priority, mods[i].active ? "true" : "false");
+                mods[i].priority, mods[i].active ? "true" : "false",
+                umf_mod_category_name((UmfModCategory)mods[i].category),
+                umf_mod_audience_name((UmfModAudience)mods[i].audience));
         }
         snprintf(res + off, UMF_IPC_MAX_RESP - off, "]");
         send_result(id, res);

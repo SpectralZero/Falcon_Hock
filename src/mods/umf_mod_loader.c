@@ -104,6 +104,8 @@ int umf_mod_list(UmfModInfo* out, int max) {
         out[n].capabilities = m->capabilities;
         out[n].priority     = m->priority;
         out[n].active       = m->active;
+        out[n].category     = (int)m->category;
+        out[n].audience     = (int)m->audience;
         n++;
     }
     ReleaseSRWLockShared(&g_mod_lock);
@@ -155,6 +157,8 @@ static bool load_native(UmfLoadedMod* slot, const char* manifest_dir) {
     slot->mod.type          = UMF_MOD_NATIVE;
     slot->mod.capabilities  = slot->manifest.capabilities;
     slot->mod.priority      = slot->manifest.priority;
+    slot->mod.category      = slot->manifest.category;
+    slot->mod.audience      = slot->manifest.audience;
     slot->mod.active        = true;
 
     if (!init(&slot->mod)) {
@@ -164,8 +168,10 @@ static bool load_native(UmfLoadedMod* slot, const char* manifest_dir) {
         return false;
     }
 
-    UMF_INFO("Mod '%s' v%s loaded (native, caps=0x%02X)",
-             slot->mod.name, slot->mod.version, slot->mod.capabilities);
+    UMF_INFO("Mod '%s' v%s loaded (native, caps=0x%02X, %s/%s)",
+             slot->mod.name, slot->mod.version, slot->mod.capabilities,
+             umf_mod_category_name(slot->mod.category),
+             umf_mod_audience_name(slot->mod.audience));
     return true;
 }
 

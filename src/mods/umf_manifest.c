@@ -8,9 +8,14 @@
  *   {
  *     "name": "...", "version": "...", "type": "native"|"lua",
  *     "entry": "...", "priority": 10,
+ *     "category": "game"|"app"|"research"|"education",
+ *     "audience": "beginner"|"expert",
  *     "dependencies": ["a", "b"],
  *     "capabilities": ["hook", "read_memory", ...]
  *   }
+ *
+ * "category" and "audience" are advisory catalogue metadata for the manager
+ * and Studio; unlike capabilities they never gate what a mod may do.
  */
 
 #include "umf/umf.h"
@@ -109,6 +114,48 @@ static uint32_t cap_flag(const char* name) {
     return 0;
 }
 
+/* ── category / audience: descriptive metadata, never a gate ──
+ *
+ * Unknown values warn and fall back to UNSPECIFIED instead of failing the
+ * manifest: a mod shipped for a newer catalogue vocabulary still loads, it
+ * just carries no opinion about where it belongs. */
+
+UmfModCategory umf_mod_category_from_string(const char* s) {
+    if (!s || !s[0]) return UMF_MOD_CATEGORY_UNSPECIFIED;
+    if (_stricmp(s, "game") == 0)      return UMF_MOD_CATEGORY_GAME;
+    if (_stricmp(s, "app") == 0)       return UMF_MOD_CATEGORY_APP;
+    if (_stricmp(s, "research") == 0)  return UMF_MOD_CATEGORY_RESEARCH;
+    if (_stricmp(s, "education") == 0) return UMF_MOD_CATEGORY_EDUCATION;
+    UMF_WARN("Unknown manifest category '%s' — treating as unspecified", s);
+    return UMF_MOD_CATEGORY_UNSPECIFIED;
+}
+
+UmfModAudience umf_mod_audience_from_string(const char* s) {
+    if (!s || !s[0]) return UMF_MOD_AUDIENCE_UNSPECIFIED;
+    if (_stricmp(s, "beginner") == 0) return UMF_MOD_AUDIENCE_BEGINNER;
+    if (_stricmp(s, "expert") == 0)   return UMF_MOD_AUDIENCE_EXPERT;
+    UMF_WARN("Unknown manifest audience '%s' — treating as unspecified", s);
+    return UMF_MOD_AUDIENCE_UNSPECIFIED;
+}
+
+const char* umf_mod_category_name(UmfModCategory c) {
+    switch (c) {
+        case UMF_MOD_CATEGORY_GAME:      return "game";
+        case UMF_MOD_CATEGORY_APP:       return "app";
+        case UMF_MOD_CATEGORY_RESEARCH:  return "research";
+        case UMF_MOD_CATEGORY_EDUCATION: return "education";
+        default:                         return "unspecified";
+    }
+}
+
+const char* umf_mod_audience_name(UmfModAudience a) {
+    switch (a) {
+        case UMF_MOD_AUDIENCE_BEGINNER: return "beginner";
+        case UMF_MOD_AUDIENCE_EXPERT:   return "expert";
+        default:                        return "unspecified";
+    }
+}
+
 bool umf_parse_manifest_string(const char* json, UmfModManifest* out) {
     if (!json || !out) return false;
     memset(out, 0, sizeof(*out));
@@ -142,6 +189,14 @@ bool umf_parse_manifest_string(const char* json, UmfModManifest* out) {
                                                          : UMF_MOD_NATIVE;
         } else if (strcmp(key, "priority") == 0) {
             p = parse_int(p, &out->priority);
+        } else if (strcmp(key, "category") == 0) {
+            char t[32];
+            p = parse_string(p, t, sizeof(t));
+            if (p) out->category = umf_mod_category_from_string(t);
+        } else if (strcmp(key, "audience") == 0) {
+            char t[32];
+            p = parse_string(p, t, sizeof(t));
+            if (p) out->audience = umf_mod_audience_from_string(t);
         } else if (strcmp(key, "dependencies") == 0) {
             p = parse_str_array(p, out->deps, UMF_MOD_MAX_DEPS, &out->dep_count);
         } else if (strcmp(key, "capabilities") == 0) {

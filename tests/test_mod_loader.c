@@ -46,6 +46,8 @@ void run_mod_loader_tests(void) {
             "  \"type\": \"native\",\n"
             "  \"entry\": \"umf_test_mod_native.dll\",\n"
             "  \"priority\": 10,\n"
+            "  \"category\": \"research\",\n"
+            "  \"audience\": \"expert\",\n"
             "  \"dependencies\": [],\n"
             "  \"capabilities\": [\"hook\"]\n"
             "}\n");
@@ -62,6 +64,17 @@ void run_mod_loader_tests(void) {
     UmfMod* m = umf_mod_find("native_demo");
     CHECK(m != NULL, "umf_mod_find locates the mod");
     CHECK(m && (m->capabilities & UMF_CAP_HOOK), "manifest capability parsed");
+    CHECK(m && m->category == UMF_MOD_CATEGORY_RESEARCH,
+          "manifest category reached the loaded mod");
+    CHECK(m && m->audience == UMF_MOD_AUDIENCE_EXPERT,
+          "manifest audience reached the loaded mod");
+
+    UmfModInfo info[4];
+    int listed = umf_mod_list(info, 4);
+    CHECK(listed == 1, "umf_mod_list returns the mod");
+    CHECK(listed == 1 && info[0].category == (int)UMF_MOD_CATEGORY_RESEARCH &&
+          info[0].audience == (int)UMF_MOD_AUDIENCE_EXPERT,
+          "umf_mod_list reports category/audience");
 
     CHECK(GetCurrentProcessId() == NATIVE_MOD_SENTINEL,
           "mod's IAT hook is live after load");

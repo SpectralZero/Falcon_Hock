@@ -291,6 +291,24 @@ typedef enum {
     UMF_CAP_FILE_IO    = 0x10,   /* may touch the filesystem     */
 } UmfCapability;
 
+/* What a mod is *for*. Purely descriptive metadata: it drives presentation
+ * and filtering in the manager/Studio and never gates behaviour — only
+ * capabilities do that. Absent or unrecognised values stay UNSPECIFIED. */
+typedef enum {
+    UMF_MOD_CATEGORY_UNSPECIFIED = 0,
+    UMF_MOD_CATEGORY_GAME,        /* gameplay mod / trainer            */
+    UMF_MOD_CATEGORY_APP,         /* general application tweak         */
+    UMF_MOD_CATEGORY_RESEARCH,    /* reverse-engineering / analysis    */
+    UMF_MOD_CATEGORY_EDUCATION,   /* teaching / demo material          */
+} UmfModCategory;
+
+/* Who a mod is aimed at — advisory only, same as category. */
+typedef enum {
+    UMF_MOD_AUDIENCE_UNSPECIFIED = 0,
+    UMF_MOD_AUDIENCE_BEGINNER,
+    UMF_MOD_AUDIENCE_EXPERT,
+} UmfModAudience;
+
 struct UmfHookEntry {
     void*             hook_func;        /* User's hook function            */
     void*             original_func;    /* Trampoline or next hook in chain */
@@ -319,14 +337,16 @@ struct UmfHookTarget {
 };
 
 struct UmfMod {
-    char       name[128];
-    HMODULE    module_handle;
-    bool       active;
-    UmfModType type;
-    uint32_t   capabilities;   /* bitmask of UmfCapability           */
-    void*      lua_state;      /* struct lua_State* for Lua mods      */
-    char       version[32];
-    int        priority;
+    char           name[128];
+    HMODULE        module_handle;
+    bool           active;
+    UmfModType     type;
+    uint32_t       capabilities;   /* bitmask of UmfCapability           */
+    void*          lua_state;      /* struct lua_State* for Lua mods      */
+    char           version[32];
+    int            priority;
+    UmfModCategory category;       /* descriptive only — never gates      */
+    UmfModAudience audience;
 };
 
 /* Registry */
@@ -691,14 +711,16 @@ UMF_API void umf_imgui_end(void);
 #define UMF_MOD_MAX_DEPS 16
 
 typedef struct {
-    char       name[128];
-    char       version[32];
-    UmfModType type;
-    char       entry[260];                 /* DLL or .lua filename        */
-    int        priority;
-    char       deps[UMF_MOD_MAX_DEPS][128]; /* dependency mod names        */
-    int        dep_count;
-    uint32_t   capabilities;               /* parsed capability bitmask   */
+    char           name[128];
+    char           version[32];
+    UmfModType     type;
+    char           entry[260];                 /* DLL or .lua filename        */
+    int            priority;
+    char           deps[UMF_MOD_MAX_DEPS][128]; /* dependency mod names        */
+    int            dep_count;
+    uint32_t       capabilities;               /* parsed capability bitmask   */
+    UmfModCategory category;                   /* "category" key, advisory    */
+    UmfModAudience audience;                   /* "audience" key, advisory    */
 } UmfModManifest;
 
 typedef bool (*UmfModInitFn)(UmfMod* self);
@@ -707,6 +729,18 @@ typedef void (*UmfModShutdownFn)(UmfMod* self);
 /* Manifest parsing */
 UMF_API bool umf_parse_manifest_string(const char* json, UmfModManifest* out);
 UMF_API bool umf_parse_manifest_file(const char* path, UmfModManifest* out);
+
+/* Category/audience metadata <-> manifest strings.
+ *
+ * The parse helpers accept the manifest spellings case-insensitively
+ * ("game"/"app"/"research"/"education", "beginner"/"expert") and return
+ * UNSPECIFIED for anything else, so an unknown value degrades to "no opinion"
+ * rather than failing the load. The name helpers are the inverse and always
+ * return a stable, non-NULL string ("unspecified" for the zero value). */
+UMF_API UmfModCategory umf_mod_category_from_string(const char* s);
+UMF_API UmfModAudience umf_mod_audience_from_string(const char* s);
+UMF_API const char*    umf_mod_category_name(UmfModCategory c);
+UMF_API const char*    umf_mod_audience_name(UmfModAudience a);
 
 /* Order `n` manifests so dependencies precede dependents (DFS post-order).
  * Writes n indices to out_order; returns false on a dependency cycle. */
@@ -727,6 +761,8 @@ typedef struct {
     uint32_t capabilities;
     int      priority;
     bool     active;
+    int      category;      /* UmfModCategory */
+    int      audience;      /* UmfModAudience */
 } UmfModInfo;
 UMF_API int     umf_mod_list(UmfModInfo* out, int max);
 

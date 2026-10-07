@@ -108,6 +108,7 @@ add_executable(umf_test
     tests/test_ipc.c
     tests/test_scan.c
     tests/test_ct.c
+    tests/test_manifest.c
 )
 
 target_include_directories(umf_test PRIVATE
