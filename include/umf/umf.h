@@ -612,6 +612,46 @@ UMF_API bool umf_scan_value_at(UmfScanSession* s, int i, double* out);
 UMF_API void umf_scan_free(UmfScanSession* s);
 
 /* ════════════════════════════════════════════════════════════════
+ * §CT — Partial Cheat Engine .CT table import
+ *
+ * Parses a .CT (XML) table into records: description, variable type,
+ * address (with module+offset), and any aobscan/aobscanmodule patterns from
+ * embedded AutoAssemblerScript blocks. This is a pragmatic subset — the CE
+ * Auto-Assembler and Lua are NOT executed; records map onto the §AOB, §MEM,
+ * and hook APIs instead.
+ * ════════════════════════════════════════════════════════════════ */
+
+#define UMF_CT_MAX_ENTRIES 256
+#define UMF_CT_MAX_SCANS   8
+
+typedef struct {
+    char name[128];
+    char pattern[256];
+    char module[64];
+} UmfCtScan;
+
+typedef struct {
+    char      description[128];
+    char      variable_type[32];
+    char      address[64];
+    char      module[64];
+    uintptr_t offset;
+    UmfCtScan scans[UMF_CT_MAX_SCANS];
+    int       scan_count;
+} UmfCtRecord;
+
+typedef struct {
+    UmfCtRecord records[UMF_CT_MAX_ENTRIES];
+    int         count;
+} UmfCtTable;
+
+UMF_API int   umf_ct_parse(const char* xml, UmfCtTable* out);
+UMF_API int   umf_ct_parse_file(const char* path, UmfCtTable* out);
+
+/* Resolve a record's AOB scans to an address (first match), or NULL. */
+UMF_API void* umf_ct_resolve(const UmfCtRecord* rec);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the

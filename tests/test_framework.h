@@ -42,6 +42,7 @@ void run_aob_tests(void);
 void run_mem_tests(void);
 void run_ipc_tests(void);
 void run_scan_tests(void);
+void run_ct_tests(void);
 
 #ifdef __cplusplus
 }

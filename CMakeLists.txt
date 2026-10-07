@@ -56,6 +56,7 @@ add_library(umf_runtime SHARED
     src/mem/umf_aob.c
     src/mem/umf_mem.c
     src/mem/umf_scan.c
+    src/mem/umf_ct.c
 
     # IPC (Studio transport)
     src/ipc/umf_ipc.c
@@ -106,6 +107,7 @@ add_executable(umf_test
     tests/test_mem.c
     tests/test_ipc.c
     tests/test_scan.c
+    tests/test_ct.c
 )
 
 target_include_directories(umf_test PRIVATE

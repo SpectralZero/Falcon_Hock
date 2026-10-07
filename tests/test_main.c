@@ -41,6 +41,7 @@ int main(void) {
     if (want("mem"))             { printf("\n[mem]\n");             run_mem_tests(); }
     if (want("ipc"))             { printf("\n[ipc]\n");             run_ipc_tests(); }
     if (want("scan"))            { printf("\n[scan]\n");           run_scan_tests(); }
+    if (want("ct"))              { printf("\n[ct]\n");             run_ct_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);
