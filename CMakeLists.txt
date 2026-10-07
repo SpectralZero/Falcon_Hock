@@ -23,6 +23,7 @@ add_library(umf_runtime SHARED
     # Util
     src/util/umf_log.c
     src/util/umf_platform.c
+    src/util/umf_launch.c
 
     # Mitigations
     src/mitigations/umf_mitigations.c
@@ -109,6 +110,7 @@ add_executable(umf_test
     tests/test_scan.c
     tests/test_ct.c
     tests/test_manifest.c
+    tests/test_launch.c
 )
 
 target_include_directories(umf_test PRIVATE
@@ -129,6 +131,16 @@ target_include_directories(umf_test_mod_native PRIVATE ${CMAKE_SOURCE_DIR}/inclu
 target_link_libraries(umf_test_mod_native PRIVATE umf_runtime)
 add_dependencies(umf_test umf_test_mod_native)
 
+# ── Launcher (elevated injector front-end; requests UAC at run time) ──
+add_executable(umf_launcher WIN32 src/launcher/umf_launcher.c)
+target_include_directories(umf_launcher PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(umf_launcher PRIVATE umf_runtime legacy_stdio_definitions)
+if(MSVC)
+    target_link_options(umf_launcher PRIVATE
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+endif()
+add_dependencies(umf_launcher umf_runtime)
+
 # ── Install ──
-install(TARGETS umf_runtime RUNTIME DESTINATION bin)
+install(TARGETS umf_runtime umf_launcher RUNTIME DESTINATION bin)
 install(DIRECTORY include/umf DESTINATION include)

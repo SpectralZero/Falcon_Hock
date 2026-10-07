@@ -42,6 +42,7 @@ int main(void) {
     if (want("ipc"))             { printf("\n[ipc]\n");             run_ipc_tests(); }
     if (want("scan"))            { printf("\n[scan]\n");           run_scan_tests(); }
     if (want("ct"))              { printf("\n[ct]\n");             run_ct_tests(); }
+    if (want("launch"))          { printf("\n[launch]\n");         run_launch_tests(); }
     if (want("manifest"))        { printf("\n[manifest]\n");       run_manifest_tests(); }
 
     printf("\n------------------------------------\n");

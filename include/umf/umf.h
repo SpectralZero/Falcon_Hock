@@ -672,6 +672,32 @@ UMF_API int   umf_ct_parse_file(const char* path, UmfCtTable* out);
 UMF_API void* umf_ct_resolve(const UmfCtRecord* rec);
 
 /* ════════════════════════════════════════════════════════════════
+ * §LAUNCH — Launcher-side privilege + AV helpers
+ *
+ * The runtime runs in-process and needs no elevation. These helpers are for
+ * the launcher/injector: enable SeDebugPrivilege to reach elevated targets,
+ * report elevation state, and (ONLY with explicit user confirmation) add a
+ * Defender exclusion. Security settings are never modified silently.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* True if the current process token is elevated (admin). */
+UMF_API bool umf_is_elevated(void);
+
+/* Enable SeDebugPrivilege on the current process token. Returns false if the
+ * token cannot be adjusted (typically: not elevated). */
+UMF_API bool umf_enable_debug_privilege(void);
+
+/* Build the exact PowerShell command that would add `path` to Defender
+ * exclusions. Never executes anything; caller shows it to the user. */
+UMF_API void umf_av_exclusion_command(const char* path,
+                                      char* out, size_t outlen);
+
+/* Add `path` to Defender exclusions — ONLY when `user_confirmed` is true.
+ * Returns false (and does nothing) otherwise. This mutates a security
+ * setting, so it must always be user-initiated. */
+UMF_API bool umf_request_av_exclusion(const char* path, bool user_confirmed);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the
