@@ -420,6 +420,49 @@ UMF_API void umf_queue_hook_disable(UmfHookTarget* target);
 UMF_API bool umf_apply_pending_batch(void);
 
 /* ════════════════════════════════════════════════════════════════
+ * §PROFILER — Per-hook call counts + timing
+ *
+ * An additive, thread-safe sampling registry (it does not touch the hook
+ * engine). A hook or mod interns a named slot once, then brackets its work
+ * with enter()/exit() — or submits a duration straight to record() — and the
+ * registry accumulates call count, total/min/max/avg nanoseconds. Timing uses
+ * QueryPerformanceCounter. Disable globally to make enter/exit/record no-ops.
+ * ════════════════════════════════════════════════════════════════ */
+
+#define UMF_PROF_MAX_SLOTS 256
+
+typedef struct {
+    char     name[128];
+    uint64_t calls;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+} UmfProfStat;
+
+UMF_API void umf_prof_reset(void);
+UMF_API void umf_prof_set_enabled(bool enabled);
+UMF_API bool umf_prof_is_enabled(void);
+
+/* Intern a slot by name (stable id for a given name), or -1 if full/invalid. */
+UMF_API int  umf_prof_slot(const char* name);
+
+/* Submit one sample (nanoseconds) to a slot. */
+UMF_API void umf_prof_record(int slot, uint64_t ns);
+
+/* Scope timing: enter() returns a start token; exit() records now-start. */
+UMF_API uint64_t umf_prof_enter(void);
+UMF_API void     umf_prof_exit(int slot, uint64_t start_token);
+
+/* Snapshot one slot (false if the id is invalid/unused). */
+UMF_API bool umf_prof_get(int slot, UmfProfStat* out);
+
+/* Copy up to `max` populated stats; returns the number written. */
+UMF_API int  umf_prof_list(UmfProfStat* out, int max);
+
+/* Mean nanoseconds for a slot (0 when it has no calls). */
+UMF_API uint64_t umf_prof_avg_ns(int slot);
+
+/* ════════════════════════════════════════════════════════════════
  * §RESOLVE — Function resolution (with forwarding)
  * ════════════════════════════════════════════════════════════════ */
 

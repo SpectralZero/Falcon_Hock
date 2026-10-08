@@ -49,6 +49,7 @@ int main(void) {
     if (want("gdi_overlay"))     { printf("\n[gdi_overlay]\n");    run_gdi_overlay_tests(); }
     if (want("crash"))           { printf("\n[crash]\n");          run_crash_tests(); }
     if (want("lua_reload"))      { printf("\n[lua_reload]\n");     run_lua_reload_tests(); }
+    if (want("profiler"))        { printf("\n[profiler]\n");       run_profiler_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

@@ -43,6 +43,9 @@ add_library(umf_runtime SHARED
     src/core/hooks/umf_hwbp.c
     src/core/hooks/umf_xfg.c
 
+    # Hook profiler (additive instrumentation)
+    src/core/hooks/umf_profiler.c
+
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
     src/sandbox/umf_lua_hook.c
@@ -127,6 +130,7 @@ add_executable(umf_test
     tests/test_gdi_overlay.c
     tests/test_crash.c
     tests/test_lua_reload.c
+    tests/test_profiler.c
 )
 
 target_include_directories(umf_test PRIVATE
