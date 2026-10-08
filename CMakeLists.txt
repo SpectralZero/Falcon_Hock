@@ -65,6 +65,9 @@ add_library(umf_runtime SHARED
     # Discovery (RTTI/vtable scanner + symbol resolver)
     src/discovery/umf_discovery.c
 
+    # Proxy / forwarder DLL generator
+    src/proxy/umf_proxy.c
+
     # Entry point
     src/umf_init.c
 )
@@ -115,6 +118,7 @@ add_executable(umf_test
     tests/test_manifest.c
     tests/test_launch.c
     tests/test_discovery.cpp
+    tests/test_proxy.c
 )
 
 target_include_directories(umf_test PRIVATE

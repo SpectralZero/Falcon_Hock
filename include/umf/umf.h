@@ -757,6 +757,51 @@ UMF_API uintptr_t umf_sym_resolve(const char* name);
 UMF_API int  umf_undecorate(const char* decorated, char* out, size_t outlen);
 
 /* ════════════════════════════════════════════════════════════════
+ * §PROXY — Proxy / forwarder DLL generator
+ *
+ * The proxy-DLL ("DLL sideloading") technique drops a DLL named like one the
+ * target already loads (version.dll, dinput8.dll, …); the proxy forwards every
+ * export to the renamed original while its DllMain brings UMF up. This module
+ * reads a DLL's export table and emits the forwarders — either a module
+ * definition (.def) file or a C source using linker /export pragmas. It only
+ * generates text; it never writes or injects anything itself.
+ * ════════════════════════════════════════════════════════════════ */
+
+#define UMF_PROXY_MAX_EXPORTS 4096
+
+typedef struct {
+    char     name[256];    /* export name, or "" when exported by ordinal only */
+    uint16_t ordinal;      /* biased export ordinal (OrdinalBase + index)      */
+    bool     by_ordinal;   /* true when the export has no name (NONAME)        */
+    bool     forwarder;    /* true when the source export is itself a forwarder */
+} UmfExport;
+
+typedef struct {
+    char      module[128];                        /* source module base name   */
+    uint32_t  base_ordinal;                       /* export directory Base      */
+    int       count;
+    UmfExport exports[UMF_PROXY_MAX_EXPORTS];
+} UmfExportTable;
+
+/* Read the export table of a loaded module (module_name is cosmetic; NULL
+ * derives it from the module path) or a DLL on disk (mapped without running
+ * it). Return false if the image has no export directory. */
+UMF_API bool umf_exports_from_module(HMODULE module, const char* module_name,
+                                     UmfExportTable* out);
+UMF_API bool umf_exports_from_file(const char* dll_path, UmfExportTable* out);
+
+/* Emit forwarders that redirect every export to `real_module` (the renamed
+ * original, e.g. "version_orig"; NULL defaults to "orig"). Both return the
+ * length that WOULD be written — like snprintf — and always NUL-terminate
+ * what they do write, so a short buffer reports the size it needs. */
+UMF_API int  umf_proxy_generate_def(const UmfExportTable* tbl,
+                                    const char* real_module,
+                                    char* out, size_t outlen);
+UMF_API int  umf_proxy_generate_pragma(const UmfExportTable* tbl,
+                                       const char* real_module,
+                                       char* out, size_t outlen);
+
+/* ════════════════════════════════════════════════════════════════
  * §OVERLAY — In-target Dear ImGui DX11 overlay
  *
  * Draws a transparent ImGui UI over a Direct3D 11 application. Hooks the
