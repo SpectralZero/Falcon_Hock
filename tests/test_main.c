@@ -47,6 +47,7 @@ int main(void) {
     if (want("discovery"))       { printf("\n[discovery]\n");      run_discovery_tests(); }
     if (want("proxy"))           { printf("\n[proxy]\n");          run_proxy_tests(); }
     if (want("gdi_overlay"))     { printf("\n[gdi_overlay]\n");    run_gdi_overlay_tests(); }
+    if (want("crash"))           { printf("\n[crash]\n");          run_crash_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

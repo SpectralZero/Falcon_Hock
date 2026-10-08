@@ -24,6 +24,7 @@ add_library(umf_runtime SHARED
     src/util/umf_log.c
     src/util/umf_platform.c
     src/util/umf_launch.c
+    src/util/umf_crash.c
 
     # Mitigations
     src/mitigations/umf_mitigations.c
@@ -123,6 +124,7 @@ add_executable(umf_test
     tests/test_discovery.cpp
     tests/test_proxy.c
     tests/test_gdi_overlay.c
+    tests/test_crash.c
 )
 
 target_include_directories(umf_test PRIVATE

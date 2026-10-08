@@ -698,6 +698,37 @@ UMF_API void umf_av_exclusion_command(const char* path,
 UMF_API bool umf_request_av_exclusion(const char* path, bool user_confirmed);
 
 /* ════════════════════════════════════════════════════════════════
+ * §CRASH — Crash handler, minidump, and safe mode
+ *
+ * Injecting a framework into someone else's process means a UMF fault would
+ * otherwise look like a host crash. This installs an unhandled-exception
+ * filter that writes a minidump and *arms safe mode* — a persisted marker that
+ * tells the next startup to come up conservatively (skip mods/hooks/overlay)
+ * so a crash loop can be broken. A clean shutdown disarms the marker.
+ *
+ * The marker and dumps live under a configurable directory. Writing a dump is
+ * a thin wrapper over dbghelp's MiniDumpWriteDump.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Directory for dumps + the safe-mode marker (NULL/"" = current directory). */
+UMF_API void umf_crash_set_dir(const char* dir);
+
+/* Install / remove the process unhandled-exception filter. The filter writes a
+ * dump, arms safe mode, then lets the default handler run. */
+UMF_API bool umf_crash_handler_install(void);
+UMF_API void umf_crash_handler_uninstall(void);
+
+/* Write a minidump of this process to `path`. `exception_pointers` may be NULL
+ * (a context-free dump, handy for diagnostics and tests). */
+UMF_API bool umf_write_minidump(void* exception_pointers, const char* path);
+
+/* Safe mode marker. arm() sets it (a crash is now "pending"); confirm_clean()
+ * clears it after an orderly shutdown; active() reports whether it is set. */
+UMF_API void umf_safe_mode_arm(void);
+UMF_API void umf_safe_mode_confirm_clean(void);
+UMF_API bool umf_safe_mode_active(void);
+
+/* ════════════════════════════════════════════════════════════════
  * §DISCOVERY — RTTI/vtable scanner + symbol resolver
  *
  * Analysis tools that turn raw addresses into names. The RTTI reader decodes

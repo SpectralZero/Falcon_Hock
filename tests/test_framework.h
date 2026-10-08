@@ -48,6 +48,7 @@ void run_manifest_tests(void);
 void run_discovery_tests(void);
 void run_proxy_tests(void);
 void run_gdi_overlay_tests(void);
+void run_crash_tests(void);
 
 #ifdef __cplusplus
 }
