@@ -46,6 +46,7 @@ add_library(umf_runtime SHARED
     # Sandbox
     src/sandbox/umf_lua_sandbox.c
     src/sandbox/umf_lua_hook.c
+    src/sandbox/umf_lua_reload.c
 
     # Mods
     src/mods/umf_manifest.c
@@ -125,6 +126,7 @@ add_executable(umf_test
     tests/test_proxy.c
     tests/test_gdi_overlay.c
     tests/test_crash.c
+    tests/test_lua_reload.c
 )
 
 target_include_directories(umf_test PRIVATE

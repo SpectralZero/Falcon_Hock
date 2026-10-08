@@ -1029,6 +1029,43 @@ UMF_API void umf_lua_setup_api(struct lua_State* L, UmfMod* mod);
 UMF_API bool umf_lua_run_string(struct lua_State* L, const char* chunk);
 
 /* ════════════════════════════════════════════════════════════════
+ * §LUARELOAD — Lua script hot-reload
+ *
+ * Watches one .lua file and, when it changes on disk, (re)loads it into a
+ * brand-new sandbox. The swap is atomic from the caller's view and
+ * fail-safe: a script that fails to compile or run leaves the previous good
+ * sandbox live and records the error, so a bad save never takes the mod down.
+ * Change detection is edge-triggered on last-write time and size.
+ *
+ * Note: reloading swaps the Lua state only; hooks a script installed live in
+ * the global registry, so a mod that re-installs hooks on reload should tear
+ * its old hooks down first (the mod manager's job, not this watcher's).
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct UmfLuaReloader UmfLuaReloader;
+
+/* Create/destroy a reloader for `script_path`. `owner` gates the umf API by
+ * capability (NULL = trusted). Nothing is loaded until the first poll/force. */
+UMF_API UmfLuaReloader* umf_lua_reload_create(const char* script_path,
+                                              UmfMod* owner);
+UMF_API void            umf_lua_reload_destroy(UmfLuaReloader* r);
+
+/* True if the file changed since the last load (and before the first load). */
+UMF_API bool umf_lua_reload_changed(UmfLuaReloader* r);
+
+/* Reload if changed (poll) or unconditionally (force). Returns 1 on a reload,
+ * 0 when unchanged, -1 on error (the previous sandbox is kept on error). */
+UMF_API int  umf_lua_reload_poll(UmfLuaReloader* r);
+UMF_API int  umf_lua_reload_force(UmfLuaReloader* r);
+
+/* The current live sandbox (NULL before the first successful load). */
+UMF_API struct lua_State* umf_lua_reload_state(UmfLuaReloader* r);
+
+/* Count of successful (re)loads, and the last error text ("" if none). */
+UMF_API int         umf_lua_reload_generation(UmfLuaReloader* r);
+UMF_API const char* umf_lua_reload_error(UmfLuaReloader* r);
+
+/* ════════════════════════════════════════════════════════════════
  * §INIT — Framework lifecycle
  * ════════════════════════════════════════════════════════════════ */
 
