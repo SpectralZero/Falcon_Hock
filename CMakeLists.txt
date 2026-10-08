@@ -53,6 +53,9 @@ add_library(umf_runtime SHARED
     # Overlay (C++ / Dear ImGui DX11)
     src/overlay/umf_overlay_dx11.cpp
 
+    # Overlay (GDI layered-window fallback)
+    src/overlay/umf_overlay_gdi.c
+
     # Memory tools
     src/mem/umf_aob.c
     src/mem/umf_mem.c
@@ -88,7 +91,7 @@ target_link_libraries(umf_runtime PRIVATE
 
 # Link Windows libs
 target_link_libraries(umf_runtime PRIVATE
-    kernel32 user32 advapi32 psapi
+    kernel32 user32 advapi32 psapi gdi32
 )
 
 # Export the UMF API
@@ -119,6 +122,7 @@ add_executable(umf_test
     tests/test_launch.c
     tests/test_discovery.cpp
     tests/test_proxy.c
+    tests/test_gdi_overlay.c
 )
 
 target_include_directories(umf_test PRIVATE

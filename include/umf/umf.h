@@ -828,6 +828,53 @@ UMF_API void umf_imgui_text(const char* text);
 UMF_API void umf_imgui_end(void);
 
 /* ════════════════════════════════════════════════════════════════
+ * §OVERLAYGDI — Layered-window GDI overlay (non-D3D fallback)
+ *
+ * For targets that are not Direct3D 11 (GDI/GDI+, OpenGL, D3D9/12, or plain
+ * Win32), this draws into a transparent, click-through, top-most layered
+ * window positioned over the target and presented with UpdateLayeredWindow
+ * (per-pixel alpha). Mods describe a frame as retained draw commands
+ * (rect/line/text) from a frame callback, exactly like the DX11 path.
+ *
+ * The shape rasteriser is a self-contained software path (umf_gdi_overlay_
+ * rasterize) that needs no window, so it is deterministic and unit-testable;
+ * text is composited through GDI in the windowed present path. Colours are
+ * packed 0xAARRGGBB via umf_gdi_rgba().
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Pack straight (non-premultiplied) 0xAARRGGBB. */
+UMF_API uint32_t umf_gdi_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+
+/* Create/destroy the layered overlay window. target_hwnd is an HWND to track
+ * (NULL = cover the whole virtual screen). */
+UMF_API bool umf_gdi_overlay_init(void* target_hwnd);
+UMF_API void umf_gdi_overlay_shutdown(void);
+UMF_API bool umf_gdi_overlay_is_active(void);
+UMF_API bool umf_gdi_overlay_size(int* out_w, int* out_h);
+UMF_API void umf_gdi_overlay_set_frame_callback(UmfOverlayFrameFn fn);
+
+/* Retained draw list. begin_frame clears it; the rect/line/text helpers append
+ * to it; command_count reports the current length. */
+UMF_API void umf_gdi_overlay_begin_frame(void);
+UMF_API void umf_gdi_rect(int x, int y, int w, int h, uint32_t argb, bool filled);
+UMF_API void umf_gdi_line(int x0, int y0, int x1, int y1, uint32_t argb);
+UMF_API void umf_gdi_text(int x, int y, uint32_t argb, const char* text);
+UMF_API int  umf_gdi_overlay_command_count(void);
+
+/* Software-rasterise the current command list into a straight-ARGB buffer
+ * (`w`*`h` pixels). Shapes are drawn directly; text is composited via GDI.
+ * Needs no window, so it is safe to call headlessly. */
+UMF_API bool umf_gdi_overlay_rasterize(uint32_t* out_argb, int w, int h);
+
+/* Present one frame: begin_frame, run the frame callback, rasterise into the
+ * window's surface, and blit with UpdateLayeredWindow. Returns false when the
+ * overlay is not active. */
+UMF_API bool umf_gdi_overlay_render(void);
+
+/* The overlay's HWND (NULL when inactive) — for inspection/positioning. */
+UMF_API void* umf_gdi_overlay_hwnd(void);
+
+/* ════════════════════════════════════════════════════════════════
  * §MOD — Mod manifest + loader
  *
  * A mod is described by a mod.json manifest and loaded from its directory.
