@@ -163,6 +163,12 @@ if(MSVC)
 endif()
 add_dependencies(umf_launcher umf_runtime)
 
+# ── Sample self-host (brings the runtime + IPC up in-process for Studio) ──
+add_executable(umf_host samples/umf_host/umf_host.c)
+target_include_directories(umf_host PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(umf_host PRIVATE umf_runtime)
+add_dependencies(umf_host umf_runtime)
+
 # ── Install ──
 install(TARGETS umf_runtime umf_launcher RUNTIME DESTINATION bin)
 install(DIRECTORY include/umf DESTINATION include)
