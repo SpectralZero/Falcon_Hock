@@ -16,6 +16,7 @@ import {
   type LogLine,
   type Mitigations,
   type ModInfo,
+  type ProcInfo,
   type ProcessInfo,
 } from "../ipc/types";
 
@@ -38,12 +39,14 @@ interface Studio {
   hooks: HookInfo[];
   mods: ModInfo[];
   logs: LogLine[];
+  processes: ProcInfo[];
 
-  connect: (pid: number) => Promise<void>;
+  connect: (pid: number) => Promise<boolean>;
   disconnect: () => Promise<void>;
   refreshAll: () => Promise<void>;
   refreshHooks: () => Promise<void>;
   refreshMods: () => Promise<void>;
+  refreshProcesses: () => Promise<void>;
   evalLua: (code: string) => Promise<boolean>;
   clearLogs: () => void;
 }
@@ -63,7 +66,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   if (!backendRef.current) backendRef.current = createBackend();
   const backend = backendRef.current;
 
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setView] = useState<View>("connection");
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -76,6 +79,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [hooks, setHooks] = useState<HookInfo[]>([]);
   const [mods, setMods] = useState<ModInfo[]>([]);
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [processes, setProcesses] = useState<ProcInfo[]>([]);
 
   const logId = useRef(0);
   const unsubs = useRef<Array<() => void>>([]);
@@ -131,6 +135,16 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     }
   }, [backend, refreshHooks, refreshMods]);
 
+  const refreshProcesses = useCallback(async () => {
+    try {
+      setProcesses(await backend.listProcesses());
+      setError(null);
+    } catch (e) {
+      setProcesses([]);
+      setError(String((e as Error)?.message ?? e));
+    }
+  }, [backend]);
+
   const handleDisconnected = useCallback(() => {
     clearSubs();
     setConnected(false);
@@ -138,7 +152,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   }, [clearSubs, pushLog]);
 
   const connect = useCallback(
-    async (targetPid: number) => {
+    async (targetPid: number): Promise<boolean> => {
       setConnecting(true);
       setError(null);
       try {
@@ -151,9 +165,11 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         unsubs.current.push(backend.onDisconnect(handleDisconnected));
         await backend.rpc("subscribe");
         await refreshAll();
+        return true;
       } catch (e) {
         setError(String((e as Error)?.message ?? e));
         setConnected(false);
+        return false;
       } finally {
         setConnecting(false);
       }
@@ -189,14 +205,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
-  // Auto-connect in mock mode so the UI is immediately alive in a browser.
-  const didInit = useRef(false);
-  useEffect(() => {
-    if (didInit.current) return;
-    didInit.current = true;
-    if (backend.kind === "mock") void connect(13337);
-    return () => clearSubs();
-  }, [backend, connect, clearSubs]);
+  useEffect(() => () => clearSubs(), [clearSubs]);
 
   const value: Studio = {
     kind: backend.kind,
@@ -213,11 +222,13 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     hooks,
     mods,
     logs,
+    processes,
     connect,
     disconnect,
     refreshAll,
     refreshHooks,
     refreshMods,
+    refreshProcesses,
     evalLua,
     clearLogs,
   };

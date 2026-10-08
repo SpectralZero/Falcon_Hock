@@ -38,7 +38,7 @@ export function WindowChrome() {
             <span className={"led " + (connected ? "ok" : "idle")} />
             {connected ? `pid ${pid}` : "offline"}
           </span>
-          <span className="badge muted">{kind === "tauri" ? "LIVE" : "DEMO"}</span>
+          <span className="badge muted">{kind === "tauri" ? "LIVE" : "BROWSER"}</span>
           <div className="win-btns">
             <button className="win-btn" title="Minimize" onClick={() => winCtl("min")}>
               <Minus size={15} />

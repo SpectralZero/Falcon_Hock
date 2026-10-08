@@ -47,13 +47,20 @@ export interface ConnectInfo {
   pipe: string;
 }
 
-export type BackendKind = "tauri" | "mock";
+export interface ProcInfo {
+  pid: number;
+  name: string;
+  attachable: boolean;
+}
+
+export type BackendKind = "tauri" | "web";
 
 export interface Backend {
   readonly kind: BackendKind;
   connect(pid: number): Promise<ConnectInfo>;
   disconnect(): Promise<void>;
   rpc<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
+  listProcesses(): Promise<ProcInfo[]>;
   onLog(cb: (level: number, msg: string) => void): () => void;
   onDisconnect(cb: () => void): () => void;
 }

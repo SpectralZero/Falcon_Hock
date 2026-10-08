@@ -6,6 +6,7 @@
 // forwards `log` notifications to the frontend as `umf://log` events.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,6 +17,12 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -157,12 +164,95 @@ fn umf_rpc(state: State<IpcState>, method: String, params: Option<Value>) -> Res
     }
 }
 
+#[derive(Serialize)]
+struct ProcInfo {
+    pid: u32,
+    name: String,
+    attachable: bool,
+}
+
+fn wstr_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// PIDs that currently expose a Hexforge runtime pipe (\\.\pipe\umf-studio-<pid>).
+fn injected_pids() -> HashSet<u32> {
+    let mut set = HashSet::new();
+    let pattern: Vec<u16> = r"\\.\pipe\umf-studio-*"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let mut data = WIN32_FIND_DATAW::default();
+        if let Ok(h) = FindFirstFileW(PCWSTR(pattern.as_ptr()), &mut data) {
+            if h != INVALID_HANDLE_VALUE {
+                loop {
+                    let name = wstr_to_string(&data.cFileName);
+                    if let Some(rest) = name.strip_prefix("umf-studio-") {
+                        if let Ok(pid) = rest.parse::<u32>() {
+                            set.insert(pid);
+                        }
+                    }
+                    if FindNextFileW(h, &mut data).is_err() {
+                        break;
+                    }
+                }
+                let _ = FindClose(h);
+            }
+        }
+    }
+    set
+}
+
+/// Enumerate running processes (pid + image name) and flag which ones have a
+/// live Hexforge runtime pipe. No data is fabricated: this is the real process
+/// table from a ToolHelp snapshot.
+#[tauri::command]
+fn umf_list_processes() -> Result<Vec<ProcInfo>, String> {
+    let injected = injected_pids();
+    let mut out: Vec<ProcInfo> = Vec::new();
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|e| e.to_string())?;
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut more = Process32FirstW(snap, &mut entry).is_ok();
+        while more {
+            let pid = entry.th32ProcessID;
+            if pid != 0 {
+                out.push(ProcInfo {
+                    pid,
+                    name: wstr_to_string(&entry.szExeFile),
+                    attachable: injected.contains(&pid),
+                });
+            }
+            more = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    out.sort_by(|a, b| {
+        b.attachable
+            .cmp(&a.attachable)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(IpcState::default())
-        .invoke_handler(tauri::generate_handler![umf_connect, umf_disconnect, umf_rpc])
+        .invoke_handler(tauri::generate_handler![
+            umf_connect,
+            umf_disconnect,
+            umf_rpc,
+            umf_list_processes
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

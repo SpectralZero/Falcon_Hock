@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Backend, ConnectInfo } from "./types";
-import { MockBackend } from "./mock";
+import type { Backend, ConnectInfo, ProcInfo } from "./types";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -11,6 +10,9 @@ interface LogPayload {
   level: number;
   msg: string;
 }
+
+const DESKTOP_ONLY =
+  "Hexforge Studio must run as the desktop app (npm run tauri dev) to reach the runtime.";
 
 // Talks to the Rust side (src-tauri), which owns the named-pipe JSON-RPC
 // connection to umf_runtime and forwards log notifications as Tauri events.
@@ -49,6 +51,10 @@ class TauriBackend implements Backend {
     return await invoke<T>("umf_rpc", { method, params: params ?? null });
   }
 
+  async listProcesses(): Promise<ProcInfo[]> {
+    return await invoke<ProcInfo[]>("umf_list_processes");
+  }
+
   onLog(cb: (level: number, msg: string) => void): () => void {
     this.logCbs.add(cb);
     return () => this.logCbs.delete(cb);
@@ -60,6 +66,29 @@ class TauriBackend implements Backend {
   }
 }
 
+// Used only when the UI is opened in a plain browser (no Tauri). It never
+// fabricates data — every runtime call rejects with a clear message so the
+// user knows to launch the desktop app.
+class WebBackend implements Backend {
+  readonly kind = "web" as const;
+  async connect(): Promise<ConnectInfo> {
+    throw new Error(DESKTOP_ONLY);
+  }
+  async disconnect(): Promise<void> {}
+  async rpc<T = unknown>(): Promise<T> {
+    throw new Error(DESKTOP_ONLY);
+  }
+  async listProcesses(): Promise<ProcInfo[]> {
+    throw new Error(DESKTOP_ONLY);
+  }
+  onLog(): () => void {
+    return () => {};
+  }
+  onDisconnect(): () => void {
+    return () => {};
+  }
+}
+
 export function createBackend(): Backend {
-  return isTauri() ? new TauriBackend() : new MockBackend();
+  return isTauri() ? new TauriBackend() : new WebBackend();
 }
