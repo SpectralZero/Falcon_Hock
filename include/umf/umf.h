@@ -98,6 +98,23 @@ UMF_API void  umf_log_write(UmfLogLevel level, const char* file, int line,
 #define UMF_ERROR(fmt, ...) UMF_LOG(UMF_LOG_ERROR, fmt, ##__VA_ARGS__)
 #define UMF_FATAL(fmt, ...) UMF_LOG(UMF_LOG_FATAL, fmt, ##__VA_ARGS__)
 
+/* Size-based rotation. When the active log grows past `max_bytes`, it is
+ * renamed umf.log.1 (shifting .1->.2 … up to `max_backups`) and a fresh log is
+ * opened. `max_bytes == 0` disables rotation — the default. */
+UMF_API void umf_log_set_rotation(size_t max_bytes, int max_backups);
+
+/* Select the on-disk format: JSON Lines (one JSON object per line) when
+ * enabled, or the human-readable text format (the default) when not. */
+UMF_API void umf_log_set_json(bool enabled);
+
+/* Serialise one record as a JSON object (no trailing newline) into `out`.
+ * Deterministic and allocation-free (used by the file logger and tests);
+ * returns the length written, snprintf-style. */
+UMF_API int  umf_log_format_json(char* out, size_t outlen,
+                                 int level, const char* file, int line,
+                                 unsigned long tid, double elapsed_ms,
+                                 const char* msg);
+
 /* ════════════════════════════════════════════════════════════════
  * §PLATFORM — Platform queries
  * ════════════════════════════════════════════════════════════════ */
