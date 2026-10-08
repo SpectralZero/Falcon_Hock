@@ -25,6 +25,7 @@ add_library(umf_runtime SHARED
     src/util/umf_platform.c
     src/util/umf_launch.c
     src/util/umf_crash.c
+    src/util/umf_arch.c
 
     # Mitigations
     src/mitigations/umf_mitigations.c
@@ -131,6 +132,7 @@ add_executable(umf_test
     tests/test_crash.c
     tests/test_lua_reload.c
     tests/test_profiler.c
+    tests/test_arch.c
 )
 
 target_include_directories(umf_test PRIVATE

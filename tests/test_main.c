@@ -50,6 +50,7 @@ int main(void) {
     if (want("crash"))           { printf("\n[crash]\n");          run_crash_tests(); }
     if (want("lua_reload"))      { printf("\n[lua_reload]\n");     run_lua_reload_tests(); }
     if (want("profiler"))        { printf("\n[profiler]\n");       run_profiler_tests(); }
+    if (want("arch"))            { printf("\n[arch]\n");           run_arch_tests(); }
 
     printf("\n------------------------------------\n");
     printf(" %d checks, %d failed\n", g_checks_run, g_checks_failed);

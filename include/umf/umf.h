@@ -165,6 +165,43 @@ UMF_API bool umf_is_endbr64(const uint8_t* code);
 UMF_API bool umf_pe_has_cet_compat(HMODULE module);
 
 /* ════════════════════════════════════════════════════════════════
+ * §ARCH — Architecture detection + per-arch strategy capability
+ *
+ * Portability groundwork. Reports the architecture this runtime was built for,
+ * the architecture of any PE image, and whether the process is running
+ * emulated (x86/x64 on ARM64). umf_arch_supported_strategies() states which
+ * hook strategies the *current engine* can implement per architecture: the
+ * full set on x64, and data-only strategies (IAT/EAT/VTABLE) elsewhere until
+ * the inline relocator, trampoline/unwind, and HWBP paths are ported. This
+ * lets strategy selection and the Studio reason about non-x64 targets without
+ * touching the (x64) hook engine.
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    UMF_ARCH_UNKNOWN = 0,
+    UMF_ARCH_X86,
+    UMF_ARCH_X64,
+    UMF_ARCH_ARM,
+    UMF_ARCH_ARM64,
+} UmfArch;
+
+/* Architecture this runtime was compiled for. */
+UMF_API UmfArch     umf_arch_current(void);
+
+/* Architecture of a loaded PE module (IMAGE_FILE_HEADER.Machine). */
+UMF_API UmfArch     umf_arch_of_module(HMODULE module);
+
+/* Stable, non-NULL name ("x64", "x86", "arm64", "arm", "unknown"). */
+UMF_API const char* umf_arch_name(UmfArch a);
+
+/* True when the process runs under emulation (e.g. x64 on an ARM64 host). */
+UMF_API bool        umf_arch_is_emulated(void);
+
+/* Hook strategies the current engine can implement on `a` (a bitmask of
+ * UmfHookStrategyFlag). Full on x64; data-only (IAT/EAT/VTABLE) elsewhere. */
+UMF_API UmfHookStrategyMask umf_arch_supported_strategies(UmfArch a);
+
+/* ════════════════════════════════════════════════════════════════
  * §TRAMPOLINE — Trampoline pool (Bug I fix: linked-list blocks)
  * ════════════════════════════════════════════════════════════════ */
 
