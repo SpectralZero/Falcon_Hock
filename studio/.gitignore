@@ -1,0 +1,15 @@
+# dependencies
+/node_modules
+
+# production build output
+/dist
+
+# Rust / Cargo build artifacts
+/src-tauri/target
+
+# Tauri generated schemas/bindings
+/src-tauri/gen
+
+# misc
+*.local
+.DS_Store
