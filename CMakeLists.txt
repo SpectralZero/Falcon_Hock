@@ -169,6 +169,9 @@ target_include_directories(umf_host PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(umf_host PRIVATE umf_runtime)
 add_dependencies(umf_host umf_runtime)
 
+# ── Practice target (safe scan/edit learning target; no deps) ──
+add_executable(hexforge_practice samples/practice/practice.c)
+
 # ── Hexforge native tool (Win32 + Dear ImGui + D3D11): external memory + injection ──
 add_executable(hexforge_tool WIN32
     tool/app.cpp

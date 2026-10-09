@@ -119,6 +119,14 @@ static std::string json_escape(const std::string& in) {
 }
 
 // ── application state ────────────────────────────────────────────────────────
+struct Watch {
+    uintptr_t addr = 0;
+    int type = 2;            // scanType index (int32)
+    bool freeze = false;
+    char label[48] = "value";
+    char value[32] = "0";
+};
+
 struct App {
     hx::Target target;
     std::vector<hx::ProcEntry> procs;
@@ -158,6 +166,8 @@ struct App {
         "umf.log(\"GetProcAddress @ \" .. tostring(p))\n";
     std::string rtOutput;
     std::unordered_set<uint32_t> runtimePids;
+
+    std::vector<Watch> watches;
 
     std::vector<std::string> log;
 
@@ -380,6 +390,18 @@ static void drawScanner(App& app) {
             }
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::PushID((int)i);
+            if (ImGui::SmallButton("+watch")) {
+                Watch w;
+                w.addr = res[i];
+                w.type = app.scanType;
+                std::string cur = fmtValueAt(app.target, res[i], scanTypeOf(app.scanType));
+                snprintf(w.value, sizeof(w.value), "%s", cur.c_str());
+                snprintf(w.label, sizeof(w.label), "addr %zu", i);
+                app.watches.push_back(w);
+            }
+            ImGui::PopID();
         }
         ImGui::EndTable();
         if (res.size() > shown) {
@@ -643,6 +665,65 @@ static void drawRuntime(App& app) {
     ImGui::EndChild();
 }
 
+static void drawWatch(App& app) {
+    bool attached = app.target.attached();
+    ImGui::TextDisabled("%zu entries. Freeze keeps writing the value every frame (e.g. infinite ammo).",
+                        app.watches.size());
+    if (app.watches.empty()) {
+        ImGui::TextDisabled("Add entries from the Scanner results (+watch button).");
+        return;
+    }
+    const char* types[] = { "int8", "int16", "int32", "int64", "float", "double" };
+    int removeIdx = -1;
+    ImGui::BeginChild("watchc", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("watch", 7,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 140);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn("Current", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("Freeze", ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < app.watches.size(); ++i) {
+            Watch& w = app.watches[i];
+            ImGui::TableNextRow();
+            ImGui::PushID((int)i);
+            ImGui::TableSetColumnIndex(0);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##l", w.label, sizeof(w.label));
+            ImGui::TableSetColumnIndex(1);
+            char a[20];
+            snprintf(a, sizeof(a), "%llX", (unsigned long long)w.addr);
+            if (ImGui::Selectable(a)) {
+                snprintf(app.hexAddr, sizeof(app.hexAddr), "%s", a);
+                snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%s", a);
+                snprintf(app.ptrAddr, sizeof(app.ptrAddr), "%s", a);
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::Combo("##t", &w.type, types, 6);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(attached ? fmtValueAt(app.target, w.addr, scanTypeOf(w.type)).c_str() : "-");
+            ImGui::TableSetColumnIndex(4);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##v", w.value, sizeof(w.value));
+            ImGui::TableSetColumnIndex(5);
+            ImGui::Checkbox("freeze", &w.freeze);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Set"))
+                writeTyped(app, w.addr, scanTypeOf(w.type), strtod(w.value, nullptr));
+            ImGui::TableSetColumnIndex(6);
+            if (ImGui::SmallButton("X")) removeIdx = (int)i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+    if (removeIdx >= 0) app.watches.erase(app.watches.begin() + removeIdx);
+}
+
 static void drawLog(App& app) {
     if (ImGui::Button("Clear")) app.log.clear();
     ImGui::BeginChild("logc", ImVec2(0, 0), true);
@@ -653,6 +734,10 @@ static void drawLog(App& app) {
 
 static void drawUI(App& app) {
     if (app.rt.connected()) app.rt.pump();
+    if (app.target.attached()) {
+        for (auto& w : app.watches)
+            if (w.freeze) writeTyped(app, w.addr, scanTypeOf(w.type), strtod(w.value, nullptr));
+    }
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -684,6 +769,7 @@ static void drawUI(App& app) {
     ImGui::BeginChild("right", ImVec2(0, 0), false);
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem("Scanner")) { drawScanner(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Watch")) { drawWatch(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Pointer Scan")) { drawPointerScan(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Disasm")) { drawDisasm(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Hex")) { drawHex(app); ImGui::EndTabItem(); }
