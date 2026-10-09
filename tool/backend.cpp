@@ -5,6 +5,9 @@
 #include <psapi.h>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace hx {
 
@@ -81,6 +84,23 @@ bool enable_debug_privilege() {
     }
     CloseHandle(tok);
     return ok;
+}
+
+std::vector<uint32_t> runtime_pids() {
+    std::vector<uint32_t> out;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(L"\\\\.\\pipe\\umf-studio-*", &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        std::wstring name = fd.cFileName;          // "umf-studio-<pid>"
+        size_t dash = name.find_last_of(L'-');
+        if (dash != std::wstring::npos) {
+            uint32_t pid = (uint32_t)wcstoul(name.c_str() + dash + 1, nullptr, 10);
+            if (pid) out.push_back(pid);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return out;
 }
 
 bool is_elevated() {
@@ -321,6 +341,104 @@ size_t Target::next_scan(ScanCompare c, double value) {
     results_.swap(keep);
     last_.swap(keepLast);
     return results_.size();
+}
+
+std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
+                                           int64_t max_offset, int max_results) {
+    std::vector<PtrChain> chains;
+    if (!h_) return chains;
+    if (max_level < 1) max_level = 1;
+    if (max_level > 6) max_level = 6;
+
+    // 1. Build an index of every plausible pointer slot: (value -> slot addr).
+    const uintptr_t kLo = 0x10000, kHi = 0x00007FFFFFFFFFFFULL;
+    std::vector<std::pair<uintptr_t, uintptr_t>> idx;   // (value, slot)
+    idx.reserve(1 << 20);
+
+    std::vector<uint8_t> buf;
+    for (const auto& r : regions()) {
+        if (!is_readable(r.protect)) continue;
+        const size_t CHUNK = 1u << 20;
+        for (size_t off = 0; off < r.size; off += CHUNK) {
+            size_t len = r.size - off;
+            if (len > CHUNK) len = CHUNK;
+            if (len < 8) break;
+            buf.resize(len);
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) || got < 8)
+                continue;
+            size_t n = (size_t)got;
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uintptr_t v = *(uintptr_t*)(buf.data() + o);
+                if (v >= kLo && v < kHi)
+                    idx.push_back({v, r.base + off + o});
+                if (idx.size() >= (1u << 22)) break;   // 4M cap
+            }
+            if (idx.size() >= (1u << 22)) break;
+        }
+        if (idx.size() >= (1u << 22)) break;
+    }
+    std::sort(idx.begin(), idx.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    auto modules_now = modules();
+    auto in_module = [&](uintptr_t addr, std::wstring& name, size_t& moff) -> bool {
+        for (const auto& m : modules_now) {
+            if (addr >= m.base && addr < m.base + m.size) {
+                name = m.name;
+                moff = addr - m.base;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 2. Reverse BFS: level 0 is the target; expand outward through pointer
+    //    slots whose value is within `max_offset` below a known node.
+    std::unordered_map<uintptr_t, std::pair<uintptr_t, int64_t>> parent;
+    std::unordered_set<uintptr_t> visited;
+    std::vector<uintptr_t> frontier{target};
+
+    for (int depth = 1; depth <= max_level && chains.size() < (size_t)max_results; ++depth) {
+        std::vector<uintptr_t> next;
+        for (uintptr_t node : frontier) {
+            uintptr_t lo = (node > (uintptr_t)max_offset) ? node - (uintptr_t)max_offset : kLo;
+            auto it = std::lower_bound(
+                idx.begin(), idx.end(), std::make_pair((uintptr_t)lo, (uintptr_t)0),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (; it != idx.end() && it->first <= node; ++it) {
+                uintptr_t V = it->first;
+                uintptr_t S = it->second;
+                if (visited.count(S)) continue;
+                visited.insert(S);
+                parent[S] = {node, (int64_t)(node - V)};
+
+                std::wstring mod;
+                size_t moff = 0;
+                if (in_module(S, mod, moff)) {
+                    if (chains.size() < (size_t)max_results) {
+                        PtrChain c;
+                        c.module = mod;
+                        c.module_offset = moff;
+                        uintptr_t cur = S;
+                        while (cur != target) {
+                            auto pit = parent.find(cur);
+                            if (pit == parent.end()) break;
+                            c.offsets.push_back(pit->second.second);
+                            cur = pit->second.first;
+                            if (c.offsets.size() > 16) break;
+                        }
+                        if (cur == target && !c.offsets.empty())
+                            chains.push_back(std::move(c));
+                    }
+                }
+                next.push_back(S);
+            }
+        }
+        frontier.swap(next);
+        if (frontier.empty()) break;
+    }
+    return chains;
 }
 
 } // namespace hx

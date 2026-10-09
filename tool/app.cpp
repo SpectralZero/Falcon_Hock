@@ -6,6 +6,9 @@
 // from the live target with ReadProcessMemory.
 
 #include "backend.hpp"
+#include "ipc.hpp"
+
+#include <Zydis/Zydis.h>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -19,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <unordered_set>
 
 // ── D3D11 plumbing ───────────────────────────────────────────────────────────
 static ID3D11Device*            g_device = nullptr;
@@ -96,6 +100,24 @@ static std::string lower(std::string s) {
     return s;
 }
 
+static std::string json_escape(const std::string& in) {
+    std::string o;
+    o.reserve(in.size() + 8);
+    for (char c : in) {
+        switch (c) {
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default:
+                if ((unsigned char)c < 0x20) { char b[8]; snprintf(b, 8, "\\u%04x", c); o += b; }
+                else o += c;
+        }
+    }
+    return o;
+}
+
 // ── application state ────────────────────────────────────────────────────────
 struct App {
     hx::Target target;
@@ -118,6 +140,25 @@ struct App {
     uint8_t hexBuf[256] = {};
     bool hexValid = false;
 
+    // pointer scanner
+    char ptrAddr[32] = "";
+    int ptrLevels = 3;
+    int64_t ptrMaxOff = 0x1000;
+    std::vector<hx::PtrChain> ptrChains;
+    std::string ptrStatus = "no pointer scan yet";
+
+    // disassembler
+    char disasmAddr[32] = "";
+    std::vector<std::string> disasmLines;
+
+    // runtime (injected engine over IPC)
+    hx::RuntimeClient rt;
+    char luaCode[2048] =
+        "local p = umf.resolve(\"kernel32.dll\", \"GetProcAddress\")\n"
+        "umf.log(\"GetProcAddress @ \" .. tostring(p))\n";
+    std::string rtOutput;
+    std::unordered_set<uint32_t> runtimePids;
+
     std::vector<std::string> log;
 
     void addlog(const std::string& s) {
@@ -126,6 +167,8 @@ struct App {
     }
     void refreshProcs() {
         procs = hx::list_processes();
+        runtimePids.clear();
+        for (uint32_t p : hx::runtime_pids()) runtimePids.insert(p);
         std::sort(procs.begin(), procs.end(), [](const hx::ProcEntry& a, const hx::ProcEntry& b) {
             return lower(w2u(a.name)) < lower(w2u(b.name));
         });
@@ -223,12 +266,17 @@ static void drawTargets(App& app) {
         std::string pids = std::to_string(p.pid);
         if (!f.empty() && lower(name).find(f) == std::string::npos && pids.find(f) == std::string::npos)
             continue;
-        char label[160];
-        snprintf(label, sizeof(label), "%-28s  %u", name.c_str(), p.pid);
+        bool hasRuntime = app.runtimePids.count(p.pid) != 0;
+        char label[192];
+        snprintf(label, sizeof(label), "%-24s %-7u%s", name.c_str(), p.pid,
+                 hasRuntime ? "  [runtime]" : "");
+        if (hasRuntime)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.24f, 0.86f, 0.52f, 1.0f));
         if (ImGui::Selectable(label, app.selectedPid == p.pid)) {
             app.selectedPid = p.pid;
             app.selectedName = name;
         }
+        if (hasRuntime) ImGui::PopStyleColor();
     }
     ImGui::EndChild();
 
@@ -327,6 +375,8 @@ static void drawScanner(App& app) {
             snprintf(a, sizeof(a), "%016llX", (unsigned long long)res[i]);
             if (ImGui::Selectable(a, false, ImGuiSelectableFlags_SpanAllColumns)) {
                 snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)res[i]);
+                snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)res[i]);
+                snprintf(app.ptrAddr, sizeof(app.ptrAddr), "%llX", (unsigned long long)res[i]);
             }
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
@@ -392,8 +442,7 @@ static void drawMemoryMap(App& app) {
             char a[32];
             snprintf(a, sizeof(a), "%016llX", (unsigned long long)r.base);
             if (ImGui::Selectable(a, false, ImGuiSelectableFlags_SpanAllColumns))
-                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)r.base);
-            ImGui::TableSetColumnIndex(1);
+                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)r.base);            ImGui::TableSetColumnIndex(1);
             ImGui::Text("%llu KB", (unsigned long long)(r.size / 1024));
             ImGui::TableSetColumnIndex(2);
             ImGui::TextUnformatted(hx::protect_name(r.protect));
@@ -429,6 +478,171 @@ static void drawModules(App& app) {
     ImGui::EndChild();
 }
 
+static void drawPointerScan(App& app) {
+    bool attached = app.target.attached();
+    ImGui::SetNextItemWidth(180);
+    ImGui::InputTextWithHint("##paddr", "target address (hex)", app.ptrAddr, sizeof(app.ptrAddr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(90);
+    ImGui::SliderInt("depth", &app.ptrLevels, 1, 6);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    int maxoff = (int)app.ptrMaxOff;
+    if (ImGui::SliderInt("max offset", &maxoff, 0, 0x4000)) app.ptrMaxOff = maxoff;
+    ImGui::SameLine();
+    if (!attached) ImGui::BeginDisabled();
+    if (ImGui::Button("Scan", ImVec2(90, 0))) {
+        uintptr_t t = (uintptr_t)strtoull(app.ptrAddr, nullptr, 16);
+        if (t) {
+            app.ptrChains = app.target.pointer_scan(t, app.ptrLevels, app.ptrMaxOff, 100);
+            app.ptrStatus = std::to_string(app.ptrChains.size()) + " chains";
+            app.addlog("pointer scan from " + std::string(app.ptrAddr) + ": " + app.ptrStatus);
+        }
+    }
+    if (!attached) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", app.ptrStatus.c_str());
+
+    ImGui::Separator();
+    ImGui::BeginChild("chains", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("chain", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Module");
+        ImGui::TableSetupColumn("offset");
+        ImGui::TableSetupColumn("chain -> target");
+        ImGui::TableHeadersRow();
+        for (const auto& c : app.ptrChains) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(w2u(c.module).c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%llX", (unsigned long long)c.module_offset);
+            ImGui::TableSetColumnIndex(2);
+            std::string s = "base";
+            for (auto off : c.offsets) {
+                char b[32];
+                snprintf(b, sizeof(b), " + 0x%llX", (unsigned long long)off);
+                s += b;
+            }
+            ImGui::TextUnformatted(s.c_str());
+        }
+        ImGui::EndTable();
+    }
+    if (app.ptrChains.empty())
+        ImGui::TextDisabled("No chains yet. Attach, scan for a value, click a result to fill the address, then Scan.");
+    ImGui::EndChild();
+}
+
+static void drawDisasm(App& app) {
+    bool attached = app.target.attached();
+    ImGui::SetNextItemWidth(220);
+    ImGui::InputTextWithHint("##daddr", "address (hex)", app.disasmAddr, sizeof(app.disasmAddr));
+    ImGui::SameLine();
+    if (!attached) ImGui::BeginDisabled();
+    if (ImGui::Button("Disassemble")) {
+        uintptr_t a = (uintptr_t)strtoull(app.disasmAddr, nullptr, 16);
+        app.disasmLines.clear();
+        if (a) {
+            uint8_t code[256];
+            if (app.target.read(a, code, sizeof(code))) {
+                ZydisDecoder dec;
+                ZydisFormatter fmt;
+                ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+                ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+                size_t off = 0;
+                for (int i = 0; i < 40 && off < sizeof(code); ++i) {
+                    ZydisDecodedInstruction ins;
+                    ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+                    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, code + off, sizeof(code) - off, &ins, ops)))
+                        break;
+                    char text[256];
+                    ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible,
+                                                    text, sizeof(text), a + off, ZYAN_NULL);
+                    std::string bytes;
+                    for (int b = 0; b < ins.length; ++b) {
+                        char hb[8];
+                        snprintf(hb, sizeof(hb), "%02X ", code[off + b]);
+                        bytes += hb;
+                    }
+                    char line[400];
+                    snprintf(line, sizeof(line), "%016llX  %-30s %s", (unsigned long long)(a + off),
+                             bytes.c_str(), text);
+                    app.disasmLines.push_back(line);
+                    off += ins.length;
+                }
+                if (app.disasmLines.empty()) app.addlog("disasm: could not decode @ " + std::string(app.disasmAddr));
+            } else {
+                app.addlog("disasm: read failed @ " + std::string(app.disasmAddr));
+            }
+        }
+    }
+    if (!attached) ImGui::EndDisabled();
+
+    ImGui::Separator();
+    ImGui::BeginChild("dis", ImVec2(0, 0), true);
+    for (const auto& l : app.disasmLines) ImGui::TextUnformatted(l.c_str());
+    if (app.disasmLines.empty()) ImGui::TextDisabled("Enter an address and Disassemble (attached target).");
+    ImGui::EndChild();
+}
+
+static void drawRuntime(App& app) {
+    if (ImGui::Button("Refresh runtimes")) app.refreshProcs();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu runtime%s detected", app.runtimePids.size(),
+                        app.runtimePids.size() == 1 ? "" : "s");
+
+    ImGui::Separator();
+    bool connected = app.rt.connected();
+    ImGui::Text("Selected: %s (%u)", app.selectedPid ? app.selectedName.c_str() : "(none)", app.selectedPid);
+    ImGui::SameLine();
+    if (!connected) {
+        if (!app.selectedPid || !app.runtimePids.count(app.selectedPid)) {
+            if (ImGui::Button("Connect to runtime (inject first)")) app.addlog("selected pid has no runtime pipe");
+        } else {
+            if (ImGui::Button("Connect to runtime")) {
+                std::string err;
+                if (app.rt.connect(app.selectedPid, err)) app.addlog("runtime connected (pid " + std::to_string(app.selectedPid) + ")");
+                else app.addlog("runtime connect failed: " + err);
+            }
+        }
+    } else {
+        if (ImGui::Button("Disconnect")) { app.rt.disconnect(); app.addlog("runtime disconnected"); }
+        ImGui::SameLine();
+        std::string err;
+        if (ImGui::Button("Mitigations")) app.rtOutput = app.rt.call("getMitigations", "null", err);
+        ImGui::SameLine();
+        if (ImGui::Button("Hooks")) app.rtOutput = app.rt.call("listHooks", "null", err);
+        ImGui::SameLine();
+        if (ImGui::Button("Mods")) app.rtOutput = app.rt.call("listMods", "null", err);
+        ImGui::SameLine();
+        if (ImGui::Button("Process info")) app.rtOutput = app.rt.call("getProcessInfo", "null", err);
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Lua (sandboxed, via evalLua):");
+    ImGui::InputTextMultiline("##lua", app.luaCode, sizeof(app.luaCode), ImVec2(-1, 120));
+    if (!connected) ImGui::BeginDisabled();
+    if (ImGui::Button("Run Lua")) {
+        std::string params = "{\"code\":\"" + json_escape(app.luaCode) + "\"}";
+        std::string err;
+        std::string res = app.rt.call("evalLua", params, err);
+        app.rtOutput = res.empty() ? ("error: " + err) : res;
+    }
+    if (!connected) ImGui::EndDisabled();
+
+    ImGui::TextUnformatted("Response:");
+    ImGui::BeginChild("rtresp", ImVec2(0, 130), true);
+    ImGui::TextWrapped("%s", app.rtOutput.empty() ? "(no response yet)" : app.rtOutput.c_str());
+    ImGui::EndChild();
+
+    ImGui::TextUnformatted("Runtime log stream:");
+    ImGui::BeginChild("rtlog", ImVec2(0, 0), true);
+    const auto& lg = app.rt.logs();
+    size_t shown = std::min<size_t>(lg.size(), 400);
+    for (size_t i = lg.size() - shown; i < lg.size(); ++i) ImGui::TextUnformatted(lg[i].c_str());
+    if (lg.empty()) ImGui::TextDisabled("(no log notifications)");
+    ImGui::EndChild();
+}
+
 static void drawLog(App& app) {
     if (ImGui::Button("Clear")) app.log.clear();
     ImGui::BeginChild("logc", ImVec2(0, 0), true);
@@ -438,6 +652,7 @@ static void drawLog(App& app) {
 }
 
 static void drawUI(App& app) {
+    if (app.rt.connected()) app.rt.pump();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -469,9 +684,12 @@ static void drawUI(App& app) {
     ImGui::BeginChild("right", ImVec2(0, 0), false);
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem("Scanner")) { drawScanner(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Pointer Scan")) { drawPointerScan(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Disasm")) { drawDisasm(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Hex")) { drawHex(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Memory Map")) { drawMemoryMap(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Modules")) { drawModules(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Runtime")) { drawRuntime(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Log")) { drawLog(app); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }

@@ -173,11 +173,13 @@ add_dependencies(umf_host umf_runtime)
 add_executable(hexforge_tool WIN32
     tool/app.cpp
     tool/backend.cpp
+    tool/ipc.cpp
     tool/hexforge.rc
 )
 target_include_directories(hexforge_tool PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(hexforge_tool PRIVATE
     imgui::imgui
+    Zydis::Zydis
     d3d11 dxgi d3dcompiler
     user32 gdi32 advapi32
 )
