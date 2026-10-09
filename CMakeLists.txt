@@ -169,6 +169,23 @@ target_include_directories(umf_host PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(umf_host PRIVATE umf_runtime)
 add_dependencies(umf_host umf_runtime)
 
+# ── Hexforge native tool (Win32 + Dear ImGui + D3D11): external memory + injection ──
+add_executable(hexforge_tool WIN32
+    tool/app.cpp
+    tool/backend.cpp
+    tool/hexforge.rc
+)
+target_include_directories(hexforge_tool PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(hexforge_tool PRIVATE
+    imgui::imgui
+    d3d11 dxgi d3dcompiler
+    user32 gdi32 advapi32
+)
+if(MSVC)
+    target_link_options(hexforge_tool PRIVATE
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+endif()
+
 # ── Install ──
 install(TARGETS umf_runtime umf_launcher RUNTIME DESTINATION bin)
 install(DIRECTORY include/umf DESTINATION include)

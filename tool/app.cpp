@@ -1,0 +1,556 @@
+// app.cpp — Hexforge native tool (Win32 + Dear ImGui + Direct3D 11).
+//
+// A real external memory tool: enumerate processes, attach for live memory,
+// inject the runtime, browse modules/regions, view & edit memory, and run a
+// Cheat-Engine-style first/next scanner. No simulation — every value is read
+// from the live target with ReadProcessMemory.
+
+#include "backend.hpp"
+
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
+#include <d3d11.h>
+#include <dxgi.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <algorithm>
+
+// ── D3D11 plumbing ───────────────────────────────────────────────────────────
+static ID3D11Device*            g_device = nullptr;
+static ID3D11DeviceContext*     g_ctx = nullptr;
+static IDXGISwapChain*          g_swap = nullptr;
+static ID3D11RenderTargetView*  g_rtv = nullptr;
+static UINT                     g_resizeW = 0, g_resizeH = 0;
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+static void CreateRTV() {
+    ID3D11Texture2D* back = nullptr;
+    g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back);
+    if (back) {
+        g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
+        back->Release();
+    }
+}
+static void CleanupRTV() {
+    if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; }
+}
+static bool CreateDeviceD3D(HWND hwnd) {
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hwnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    UINT flags = 0;
+    D3D_FEATURE_LEVEL fl;
+    const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                                               levels, 2, D3D11_SDK_VERSION, &sd, &g_swap,
+                                               &g_device, &fl, &g_ctx);
+    if (hr == DXGI_ERROR_UNSUPPORTED)
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+                                           levels, 2, D3D11_SDK_VERSION, &sd, &g_swap,
+                                           &g_device, &fl, &g_ctx);
+    if (FAILED(hr)) return false;
+    CreateRTV();
+    return true;
+}
+static void CleanupDeviceD3D() {
+    CleanupRTV();
+    if (g_swap) { g_swap->Release(); g_swap = nullptr; }
+    if (g_ctx) { g_ctx->Release(); g_ctx = nullptr; }
+    if (g_device) { g_device->Release(); g_device = nullptr; }
+}
+
+static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
+    switch (msg) {
+        case WM_SIZE:
+            if (wp != SIZE_MINIMIZED) { g_resizeW = LOWORD(lp); g_resizeH = HIWORD(lp); }
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+static std::string w2u(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+static std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
+    return s;
+}
+
+// ── application state ────────────────────────────────────────────────────────
+struct App {
+    hx::Target target;
+    std::vector<hx::ProcEntry> procs;
+    char procFilter[128] = "";
+    uint32_t selectedPid = 0;
+    std::string selectedName;
+
+    std::vector<hx::ModuleEntry> modules;
+    std::vector<hx::RegionEntry> regions;
+
+    int scanType = 2;        // int32
+    int scanCompare = 0;     // exact
+    char scanValue[64] = "";
+    char setValue[64] = "";
+    bool writableOnly = true;
+    std::string scanStatus = "no scan yet";
+
+    char hexAddr[32] = "";
+    uint8_t hexBuf[256] = {};
+    bool hexValid = false;
+
+    std::vector<std::string> log;
+
+    void addlog(const std::string& s) {
+        log.push_back(s);
+        if (log.size() > 500) log.erase(log.begin(), log.begin() + (log.size() - 500));
+    }
+    void refreshProcs() {
+        procs = hx::list_processes();
+        std::sort(procs.begin(), procs.end(), [](const hx::ProcEntry& a, const hx::ProcEntry& b) {
+            return lower(w2u(a.name)) < lower(w2u(b.name));
+        });
+    }
+};
+
+static hx::ScanType scanTypeOf(int i) {
+    switch (i) {
+        case 0: return hx::ScanType::I8;
+        case 1: return hx::ScanType::I16;
+        case 2: return hx::ScanType::I32;
+        case 3: return hx::ScanType::I64;
+        case 4: return hx::ScanType::F32;
+        default: return hx::ScanType::F64;
+    }
+}
+static std::string fmtValueAt(hx::Target& t, uintptr_t addr, hx::ScanType ty) {
+    uint8_t b[8] = {};
+    if (!t.read(addr, b, hx::type_size(ty))) return "??";
+    char out[64];
+    switch (ty) {
+        case hx::ScanType::I8: snprintf(out, 64, "%d", *(int8_t*)b); break;
+        case hx::ScanType::I16: snprintf(out, 64, "%d", *(int16_t*)b); break;
+        case hx::ScanType::I32: snprintf(out, 64, "%d", *(int32_t*)b); break;
+        case hx::ScanType::I64: snprintf(out, 64, "%lld", (long long)*(int64_t*)b); break;
+        case hx::ScanType::F32: snprintf(out, 64, "%.4f", *(float*)b); break;
+        case hx::ScanType::F64: snprintf(out, 64, "%.4f", *(double*)b); break;
+    }
+    return out;
+}
+static void writeTyped(App& app, uintptr_t addr, hx::ScanType ty, double v) {
+    uint8_t b[8] = {};
+    switch (ty) {
+        case hx::ScanType::I8: *(int8_t*)b = (int8_t)v; break;
+        case hx::ScanType::I16: *(int16_t*)b = (int16_t)v; break;
+        case hx::ScanType::I32: *(int32_t*)b = (int32_t)v; break;
+        case hx::ScanType::I64: *(int64_t*)b = (int64_t)v; break;
+        case hx::ScanType::F32: *(float*)b = (float)v; break;
+        case hx::ScanType::F64: *(double*)b = v; break;
+    }
+    app.target.write(addr, b, hx::type_size(ty));
+}
+
+// ── UI theme ─────────────────────────────────────────────────────────────────
+static void StyleHexforge() {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = 8;
+    s.FrameRounding = 6;
+    s.GrabRounding = 6;
+    s.TabRounding = 6;
+    s.ChildRounding = 8;
+    s.WindowPadding = ImVec2(12, 12);
+    s.FramePadding = ImVec2(8, 5);
+    s.ItemSpacing = ImVec2(8, 7);
+    ImVec4* c = s.Colors;
+    const ImVec4 accent(0.486f, 0.361f, 1.0f, 1.0f);   // #7C5CFF
+    const ImVec4 accent2(0.208f, 0.878f, 0.816f, 1.0f); // #35E0D0
+    c[ImGuiCol_WindowBg] = ImVec4(0.039f, 0.047f, 0.071f, 1.0f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.055f, 0.067f, 0.098f, 1.0f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.09f, 0.11f, 0.16f, 1.0f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.13f, 0.16f, 0.23f, 1.0f);
+    c[ImGuiCol_TitleBg] = ImVec4(0.05f, 0.06f, 0.09f, 1.0f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.07f, 0.08f, 0.12f, 1.0f);
+    c[ImGuiCol_Header] = ImVec4(accent.x, accent.y, accent.z, 0.28f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(accent.x, accent.y, accent.z, 0.45f);
+    c[ImGuiCol_HeaderActive] = ImVec4(accent.x, accent.y, accent.z, 0.65f);
+    c[ImGuiCol_Button] = ImVec4(0.13f, 0.16f, 0.23f, 1.0f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+    c[ImGuiCol_ButtonActive] = ImVec4(accent.x, accent.y, accent.z, 0.8f);
+    c[ImGuiCol_Tab] = ImVec4(0.09f, 0.11f, 0.16f, 1.0f);
+    c[ImGuiCol_TabHovered] = ImVec4(accent.x, accent.y, accent.z, 0.6f);
+    c[ImGuiCol_TabActive] = ImVec4(accent.x, accent.y, accent.z, 0.75f);
+    c[ImGuiCol_CheckMark] = accent2;
+    c[ImGuiCol_SliderGrab] = accent;
+    c[ImGuiCol_Separator] = ImVec4(1, 1, 1, 0.08f);
+    c[ImGuiCol_Border] = ImVec4(1, 1, 1, 0.08f);
+}
+
+// ── panels ───────────────────────────────────────────────────────────────────
+static void drawTargets(App& app) {
+    ImGui::BeginChild("targets", ImVec2(360, 0), true);
+    ImGui::TextColored(ImVec4(0.49f, 0.36f, 1.0f, 1.0f), "TARGETS");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+    if (ImGui::SmallButton("Rescan")) app.refreshProcs();
+    ImGui::Separator();
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##filter", "search name or PID", app.procFilter, sizeof(app.procFilter));
+
+    std::string f = lower(app.procFilter);
+    ImGui::BeginChild("proclist", ImVec2(0, -84), true);
+    for (const auto& p : app.procs) {
+        std::string name = w2u(p.name);
+        std::string pids = std::to_string(p.pid);
+        if (!f.empty() && lower(name).find(f) == std::string::npos && pids.find(f) == std::string::npos)
+            continue;
+        char label[160];
+        snprintf(label, sizeof(label), "%-28s  %u", name.c_str(), p.pid);
+        if (ImGui::Selectable(label, app.selectedPid == p.pid)) {
+            app.selectedPid = p.pid;
+            app.selectedName = name;
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::Text("Selected: %s", app.selectedPid ? app.selectedName.c_str() : "(none)");
+    bool has = app.selectedPid != 0;
+    if (!has) ImGui::BeginDisabled();
+    if (ImGui::Button("Attach", ImVec2(110, 0))) {
+        std::string err;
+        if (app.target.attach(app.selectedPid, err)) {
+            app.addlog("attached to pid " + std::to_string(app.selectedPid) + " (" + app.selectedName + ")");
+            app.modules = app.target.modules();
+            app.regions = app.target.regions();
+        } else {
+            app.addlog("attach failed: " + err);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Inject runtime", ImVec2(150, 0))) {
+        std::string err;
+        if (hx::inject_dll(app.selectedPid, hx::runtime_dll_path(), err))
+            app.addlog("injected umf_runtime.dll into pid " + std::to_string(app.selectedPid));
+        else
+            app.addlog("inject failed: " + err);
+    }
+    if (!has) ImGui::EndDisabled();
+    ImGui::EndChild();
+}
+
+static void drawScanner(App& app) {
+    const char* types[] = { "int8", "int16", "int32", "int64", "float", "double" };
+    const char* cmps[] = { "exact", "changed", "unchanged", "increased", "decreased" };
+    ImGui::SetNextItemWidth(120);
+    ImGui::Combo("type", &app.scanType, types, 6);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    ImGui::InputText("value", app.scanValue, sizeof(app.scanValue));
+
+    bool attached = app.target.attached();
+    if (!attached) ImGui::BeginDisabled();
+    if (ImGui::Button("First Scan", ImVec2(110, 0))) {
+        double v = strtod(app.scanValue, nullptr);
+        size_t n = app.target.first_scan(scanTypeOf(app.scanType), v, app.writableOnly);
+        app.scanStatus = std::to_string(n) + " matches";
+        app.addlog("first scan: " + app.scanStatus);
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130);
+    ImGui::Combo("##cmp", &app.scanCompare, cmps, 5);
+    ImGui::SameLine();
+    if (ImGui::Button("Next Scan", ImVec2(110, 0))) {
+        double v = strtod(app.scanValue, nullptr);
+        size_t n = app.target.next_scan((hx::ScanCompare)app.scanCompare, v);
+        app.scanStatus = std::to_string(n) + " matches";
+        app.addlog("next scan (" + std::string(cmps[app.scanCompare]) + "): " + app.scanStatus);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset")) {
+        app.target.clear_scan();
+        app.scanStatus = "cleared";
+    }
+    if (!attached) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::Checkbox("writable only", &app.writableOnly);
+
+    ImGui::Separator();
+    ImGui::Text("Results: %s", app.scanStatus.c_str());
+
+    // bulk edit
+    ImGui::SetNextItemWidth(160);
+    ImGui::InputText("new value", app.setValue, sizeof(app.setValue));
+    ImGui::SameLine();
+    if (!attached || app.target.results().empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Apply to all results")) {
+        double v = strtod(app.setValue, nullptr);
+        size_t cap = std::min<size_t>(app.target.results().size(), 100000);
+        for (size_t i = 0; i < cap; ++i)
+            writeTyped(app, app.target.results()[i], scanTypeOf(app.scanType), v);
+        app.addlog("wrote value to " + std::to_string(cap) + " addresses");
+    }
+    if (!attached || app.target.results().empty()) ImGui::EndDisabled();
+
+    ImGui::BeginChild("results", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("res", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Address");
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        const auto& res = app.target.results();
+        size_t shown = std::min<size_t>(res.size(), 500);
+        for (size_t i = 0; i < shown; ++i) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            char a[32];
+            snprintf(a, sizeof(a), "%016llX", (unsigned long long)res[i]);
+            if (ImGui::Selectable(a, false, ImGuiSelectableFlags_SpanAllColumns)) {
+                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)res[i]);
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
+        }
+        ImGui::EndTable();
+        if (res.size() > shown) {
+            ImGui::TextDisabled("... %zu more (showing first %zu)", res.size() - shown, shown);
+        }
+    }
+    ImGui::EndChild();
+}
+
+static void drawHex(App& app) {
+    ImGui::SetNextItemWidth(220);
+    ImGui::InputTextWithHint("##addr", "address (hex, e.g. 7FF6...)", app.hexAddr, sizeof(app.hexAddr));
+    ImGui::SameLine();
+    bool attached = app.target.attached();
+    if (!attached) ImGui::BeginDisabled();
+    if (ImGui::Button("Read")) {
+        uintptr_t a = (uintptr_t)strtoull(app.hexAddr, nullptr, 16);
+        app.hexValid = a && app.target.read(a, app.hexBuf, sizeof(app.hexBuf));
+        if (!app.hexValid) app.addlog("read failed @ " + std::string(app.hexAddr));
+    }
+    if (!attached) ImGui::EndDisabled();
+
+    ImGui::Separator();
+    uintptr_t base = (uintptr_t)strtoull(app.hexAddr, nullptr, 16);
+    ImGui::BeginChild("hexdump", ImVec2(0, 0), true);
+    if (app.hexValid) {
+        for (int row = 0; row < 16; ++row) {
+            char line[160];
+            int off = row * 16;
+            int n = snprintf(line, sizeof(line), "%016llX  ", (unsigned long long)(base + off));
+            for (int i = 0; i < 16; ++i)
+                n += snprintf(line + n, sizeof(line) - n, "%02X ", app.hexBuf[off + i]);
+            n += snprintf(line + n, sizeof(line) - n, " ");
+            for (int i = 0; i < 16; ++i) {
+                uint8_t ch = app.hexBuf[off + i];
+                n += snprintf(line + n, sizeof(line) - n, "%c", (ch >= 32 && ch < 127) ? ch : '.');
+            }
+            ImGui::TextUnformatted(line);
+        }
+    } else {
+        ImGui::TextDisabled("Enter an address and press Read (attach a target first).");
+    }
+    ImGui::EndChild();
+}
+
+static void drawMemoryMap(App& app) {
+    if (ImGui::Button("Refresh")) app.regions = app.target.regions();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu committed regions", app.regions.size());
+    ImGui::BeginChild("regions", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("rgn", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Base");
+        ImGui::TableSetupColumn("Size");
+        ImGui::TableSetupColumn("Prot");
+        ImGui::TableSetupColumn("Type");
+        ImGui::TableHeadersRow();
+        for (const auto& r : app.regions) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            char a[32];
+            snprintf(a, sizeof(a), "%016llX", (unsigned long long)r.base);
+            if (ImGui::Selectable(a, false, ImGuiSelectableFlags_SpanAllColumns))
+                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)r.base);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%llu KB", (unsigned long long)(r.size / 1024));
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(hx::protect_name(r.protect));
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%s", r.type == MEM_IMAGE ? "image" : r.type == MEM_MAPPED ? "mapped" : "private");
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+}
+
+static void drawModules(App& app) {
+    if (ImGui::Button("Refresh")) app.modules = app.target.modules();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu modules", app.modules.size());
+    ImGui::BeginChild("mods", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("mod", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Module");
+        ImGui::TableSetupColumn("Base");
+        ImGui::TableSetupColumn("Size");
+        ImGui::TableHeadersRow();
+        for (const auto& m : app.modules) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(w2u(m.name).c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%016llX", (unsigned long long)m.base);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%llu KB", (unsigned long long)(m.size / 1024));
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+}
+
+static void drawLog(App& app) {
+    if (ImGui::Button("Clear")) app.log.clear();
+    ImGui::BeginChild("logc", ImVec2(0, 0), true);
+    for (const auto& l : app.log) ImGui::TextUnformatted(l.c_str());
+    if (!app.log.empty()) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+}
+
+static void drawUI(App& app) {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::Begin("Hexforge##main", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    // header
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.49f, 0.36f, 1.0f, 1.0f));
+    ImGui::SetWindowFontScale(1.4f);
+    ImGui::TextUnformatted("HEXFORGE");
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("native memory + injection tool");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 240);
+    ImGui::TextColored(hx::is_elevated() ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(1, 0.71f, 0.33f, 1),
+                       hx::is_elevated() ? "ADMIN" : "not elevated");
+    ImGui::SameLine();
+    if (app.target.attached())
+        ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "attached pid %u", app.target.pid());
+    else
+        ImGui::TextDisabled("not attached");
+    ImGui::Separator();
+
+    drawTargets(app);
+    ImGui::SameLine();
+
+    ImGui::BeginChild("right", ImVec2(0, 0), false);
+    if (ImGui::BeginTabBar("tabs")) {
+        if (ImGui::BeginTabItem("Scanner")) { drawScanner(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Hex")) { drawHex(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Memory Map")) { drawMemoryMap(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Modules")) { drawModules(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Log")) { drawLog(app); ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
+    ImGui::EndChild();
+
+    ImGui::End();
+}
+
+// ── entry point ──────────────────────────────────────────────────────────────
+int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInst;
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
+    wc.hIconSm = wc.hIcon;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"HexforgeToolWnd";
+    RegisterClassExW(&wc);
+
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Hexforge", WS_OVERLAPPEDWINDOW,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1240, 820, nullptr, nullptr, hInst, nullptr);
+    if (!CreateDeviceD3D(hwnd)) {
+        CleanupDeviceD3D();
+        UnregisterClassW(wc.lpszClassName, hInst);
+        return 1;
+    }
+    ShowWindow(hwnd, SW_SHOWDEFAULT);
+    UpdateWindow(hwnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    StyleHexforge();
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX11_Init(g_device, g_ctx);
+
+    App app;
+    hx::enable_debug_privilege();
+    app.refreshProcs();
+    app.addlog("Hexforge ready. Rights: " + std::string(hx::is_elevated() ? "elevated" : "standard"));
+
+    bool running = true;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (msg.message == WM_QUIT) running = false;
+        }
+        if (!running) break;
+
+        if (g_resizeW && g_resizeH) {
+            CleanupRTV();
+            g_swap->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0);
+            g_resizeW = g_resizeH = 0;
+            CreateRTV();
+        }
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        drawUI(app);
+        ImGui::Render();
+
+        const float clear[4] = { 0.02f, 0.03f, 0.05f, 1.0f };
+        g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+        g_ctx->ClearRenderTargetView(g_rtv, clear);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_swap->Present(1, 0);
+    }
+
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    CleanupDeviceD3D();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, hInst);
+    return 0;
+}
