@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 
 namespace hx {
 
@@ -70,8 +71,19 @@ public:
     bool write(uintptr_t addr, const void* in, size_t n) const;
 
     // Scanner
-    size_t first_scan(ScanType t, double value, bool writable_only);
-    size_t next_scan(ScanCompare c, double value);
+    // Scanner. `cancel`/`progress` are optional: a worker thread sets *cancel
+    // to stop early and reads *progress (0..1) for a progress bar.
+    size_t first_scan(ScanType t, double value, bool writable_only,
+                      std::atomic<bool>* cancel = nullptr,
+                      std::atomic<float>* progress = nullptr);
+    // Unknown initial value: record every slot so Next Scan (increased/decreased/
+    // changed) works without knowing the number.
+    size_t first_scan_unknown(ScanType t, bool writable_only,
+                              std::atomic<bool>* cancel = nullptr,
+                              std::atomic<float>* progress = nullptr);
+    size_t next_scan(ScanCompare c, double value,
+                     std::atomic<bool>* cancel = nullptr,
+                     std::atomic<float>* progress = nullptr);
     void clear_scan();
     ScanType scan_type() const { return stype_; }
     const std::vector<uintptr_t>& results() const { return results_; }

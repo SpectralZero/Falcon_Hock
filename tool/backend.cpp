@@ -276,42 +276,102 @@ static bool approx(double a, double b, ScanType t) {
 }
 
 static const size_t kScanCap = 2'000'000;
+static const size_t kUnknownCap = 12'000'000;
 
-size_t Target::first_scan(ScanType t, double value, bool writable_only) {
+static uint64_t total_scan_bytes(const std::vector<RegionEntry>& regs, bool writable_only) {
+    uint64_t total = 0;
+    for (const auto& r : regs) {
+        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
+        if (usable) total += r.size;
+    }
+    return total ? total : 1;
+}
+
+size_t Target::first_scan(ScanType t, double value, bool writable_only,
+                          std::atomic<bool>* cancel, std::atomic<float>* progress) {
     clear_scan();
     stype_ = t;
     if (!h_) return 0;
     size_t ts = type_size(t);
 
+    auto regs = regions();
+    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
     std::vector<uint8_t> buf;
-    for (const auto& r : regions()) {
+    for (const auto& r : regs) {
+        if (cancel && cancel->load()) break;
         bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
         if (!usable) continue;
 
-        const size_t CHUNK = 1u << 20; // 1 MiB
+        const size_t CHUNK = 1u << 20;
         for (size_t off = 0; off < r.size; off += CHUNK) {
+            if (cancel && cancel->load()) break;
             size_t len = r.size - off;
             if (len > CHUNK) len = CHUNK;
             if (len < ts) break;
             buf.resize(len);
             SIZE_T got = 0;
-            if (!ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) || got < ts)
-                continue;
-            size_t usable_len = (size_t)got;
-            for (size_t o = 0; o + ts <= usable_len; o += ts) {
-                double v = read_as_double(buf.data() + o, t);
-                if (approx(v, value, t)) {
-                    results_.push_back(r.base + off + o);
-                    last_.push_back(v);
-                    if (results_.size() >= kScanCap) return results_.size();
+            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= ts) {
+                size_t usable_len = (size_t)got;
+                for (size_t o = 0; o + ts <= usable_len; o += ts) {
+                    double v = read_as_double(buf.data() + o, t);
+                    if (approx(v, value, t)) {
+                        results_.push_back(r.base + off + o);
+                        last_.push_back(v);
+                        if (results_.size() >= kScanCap) { done = total; goto done_label; }
+                    }
                 }
             }
+            done += len;
+            if (progress) progress->store((float)((double)done / (double)total));
         }
     }
+done_label:
+    if (progress) progress->store(1.0f);
     return results_.size();
 }
 
-size_t Target::next_scan(ScanCompare c, double value) {
+size_t Target::first_scan_unknown(ScanType t, bool writable_only,
+                                  std::atomic<bool>* cancel, std::atomic<float>* progress) {
+    clear_scan();
+    stype_ = t;
+    if (!h_) return 0;
+    size_t ts = type_size(t);
+
+    auto regs = regions();
+    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
+    std::vector<uint8_t> buf;
+    for (const auto& r : regs) {
+        if (cancel && cancel->load()) break;
+        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
+        if (!usable) continue;
+
+        const size_t CHUNK = 1u << 20;
+        for (size_t off = 0; off < r.size; off += CHUNK) {
+            if (cancel && cancel->load()) break;
+            size_t len = r.size - off;
+            if (len > CHUNK) len = CHUNK;
+            if (len < ts) break;
+            buf.resize(len);
+            SIZE_T got = 0;
+            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= ts) {
+                size_t usable_len = (size_t)got;
+                for (size_t o = 0; o + ts <= usable_len; o += ts) {
+                    results_.push_back(r.base + off + o);
+                    last_.push_back(read_as_double(buf.data() + o, t));
+                    if (results_.size() >= kUnknownCap) { done = total; goto done_label; }
+                }
+            }
+            done += len;
+            if (progress) progress->store((float)((double)done / (double)total));
+        }
+    }
+done_label:
+    if (progress) progress->store(1.0f);
+    return results_.size();
+}
+
+size_t Target::next_scan(ScanCompare c, double value,
+                         std::atomic<bool>* cancel, std::atomic<float>* progress) {
     if (!h_) return 0;
     size_t ts = type_size(stype_);
     std::vector<uintptr_t> keep;
@@ -320,7 +380,10 @@ size_t Target::next_scan(ScanCompare c, double value) {
     keepLast.reserve(results_.size());
 
     uint8_t tmp[8];
-    for (size_t i = 0; i < results_.size(); ++i) {
+    size_t n = results_.size();
+    for (size_t i = 0; i < n; ++i) {
+        if (cancel && (i & 0xFFFF) == 0 && cancel->load()) break;
+        if (progress && (i & 0xFFFF) == 0 && n) progress->store((float)((double)i / (double)n));
         SIZE_T got = 0;
         if (!ReadProcessMemory(h_, (LPCVOID)results_[i], tmp, ts, &got) || got != ts) continue;
         double cur = read_as_double(tmp, stype_);
@@ -340,6 +403,7 @@ size_t Target::next_scan(ScanCompare c, double value) {
     }
     results_.swap(keep);
     last_.swap(keepLast);
+    if (progress) progress->store(1.0f);
     return results_.size();
 }
 
