@@ -173,6 +173,7 @@ add_dependencies(umf_host umf_runtime)
 add_executable(hexforge_tool WIN32
     tool/app.cpp
     tool/backend.cpp
+    tool/trainer.cpp
     tool/ipc.cpp
     tool/hexforge.rc
 )
@@ -187,6 +188,27 @@ if(MSVC)
     target_link_options(hexforge_tool PRIVATE
         "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
 endif()
+
+# ── Hexforge standalone trainer runner: becomes the exported trainer .exe ──
+# The main tool copies this exe and appends a cheat table as an overlay, so one
+# prebuilt runner can serve as any game's shareable single-file trainer.
+add_executable(hexforge_trainer WIN32
+    tool/trainer_runner.cpp
+    tool/backend.cpp
+    tool/trainer.cpp
+    tool/hexforge.rc
+)
+target_include_directories(hexforge_trainer PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(hexforge_trainer PRIVATE
+    imgui::imgui
+    d3d11 dxgi d3dcompiler
+    user32 gdi32 advapi32
+)
+if(MSVC)
+    target_link_options(hexforge_trainer PRIVATE
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+endif()
+add_dependencies(hexforge_tool hexforge_trainer)
 
 # ── Install ──
 install(TARGETS umf_runtime umf_launcher RUNTIME DESTINATION bin)

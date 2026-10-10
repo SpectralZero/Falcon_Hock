@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 namespace hx {
 
@@ -86,7 +87,10 @@ public:
                      std::atomic<float>* progress = nullptr);
     void clear_scan();
     ScanType scan_type() const { return stype_; }
-    const std::vector<uintptr_t>& results() const { return results_; }
+
+    // Thread-safe result access (scans run on a worker thread).
+    size_t result_count() const;
+    std::vector<uintptr_t> results_snapshot(size_t max) const;
 
     // Static pointer scan: find chains of pointers (with small offsets) that
     // resolve to `target`. Depth `max_level`, per-hop offset limit
@@ -98,6 +102,7 @@ private:
     HANDLE h_ = nullptr;
     uint32_t pid_ = 0;
     ScanType stype_ = ScanType::I32;
+    mutable std::mutex mtx_;
     std::vector<uintptr_t> results_;
     std::vector<double> last_;
 };

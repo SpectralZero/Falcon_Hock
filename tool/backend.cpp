@@ -253,8 +253,20 @@ bool Target::write(uintptr_t addr, const void* in, size_t n) const {
 }
 
 void Target::clear_scan() {
+    std::lock_guard<std::mutex> lk(mtx_);
     results_.clear();
     last_.clear();
+}
+
+size_t Target::result_count() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return results_.size();
+}
+
+std::vector<uintptr_t> Target::results_snapshot(size_t max) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    size_t n = results_.size() < max ? results_.size() : max;
+    return std::vector<uintptr_t>(results_.begin(), results_.begin() + n);
 }
 
 static double read_as_double(const uint8_t* p, ScanType t) {
@@ -296,6 +308,8 @@ size_t Target::first_scan(ScanType t, double value, bool writable_only,
 
     auto regs = regions();
     uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
+    std::vector<uintptr_t> rr;   // built locally, published under lock at the end
+    std::vector<double> ll;
     std::vector<uint8_t> buf;
     for (const auto& r : regs) {
         if (cancel && cancel->load()) break;
@@ -315,9 +329,9 @@ size_t Target::first_scan(ScanType t, double value, bool writable_only,
                 for (size_t o = 0; o + ts <= usable_len; o += ts) {
                     double v = read_as_double(buf.data() + o, t);
                     if (approx(v, value, t)) {
-                        results_.push_back(r.base + off + o);
-                        last_.push_back(v);
-                        if (results_.size() >= kScanCap) { done = total; goto done_label; }
+                        rr.push_back(r.base + off + o);
+                        ll.push_back(v);
+                        if (rr.size() >= kScanCap) { done = total; goto done_label; }
                     }
                 }
             }
@@ -327,6 +341,9 @@ size_t Target::first_scan(ScanType t, double value, bool writable_only,
     }
 done_label:
     if (progress) progress->store(1.0f);
+    std::lock_guard<std::mutex> lk(mtx_);
+    results_.swap(rr);
+    last_.swap(ll);
     return results_.size();
 }
 
@@ -339,6 +356,8 @@ size_t Target::first_scan_unknown(ScanType t, bool writable_only,
 
     auto regs = regions();
     uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
+    std::vector<uintptr_t> rr;
+    std::vector<double> ll;
     std::vector<uint8_t> buf;
     for (const auto& r : regs) {
         if (cancel && cancel->load()) break;
@@ -356,9 +375,9 @@ size_t Target::first_scan_unknown(ScanType t, bool writable_only,
             if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= ts) {
                 size_t usable_len = (size_t)got;
                 for (size_t o = 0; o + ts <= usable_len; o += ts) {
-                    results_.push_back(r.base + off + o);
-                    last_.push_back(read_as_double(buf.data() + o, t));
-                    if (results_.size() >= kUnknownCap) { done = total; goto done_label; }
+                    rr.push_back(r.base + off + o);
+                    ll.push_back(read_as_double(buf.data() + o, t));
+                    if (rr.size() >= kUnknownCap) { done = total; goto done_label; }
                 }
             }
             done += len;
@@ -367,27 +386,41 @@ size_t Target::first_scan_unknown(ScanType t, bool writable_only,
     }
 done_label:
     if (progress) progress->store(1.0f);
+    std::lock_guard<std::mutex> lk(mtx_);
+    results_.swap(rr);
+    last_.swap(ll);
     return results_.size();
 }
 
 size_t Target::next_scan(ScanCompare c, double value,
                          std::atomic<bool>* cancel, std::atomic<float>* progress) {
     if (!h_) return 0;
+
+    // Snapshot the current set under lock, then work on the copy with no lock
+    // held (the long memory-read loop must not block the UI's snapshot reads).
+    std::vector<uintptr_t> rr;
+    std::vector<double> ll;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        rr = results_;
+        ll = last_;
+    }
+
     size_t ts = type_size(stype_);
     std::vector<uintptr_t> keep;
     std::vector<double> keepLast;
-    keep.reserve(results_.size());
-    keepLast.reserve(results_.size());
+    keep.reserve(rr.size());
+    keepLast.reserve(rr.size());
 
     uint8_t tmp[8];
-    size_t n = results_.size();
+    size_t n = rr.size();
     for (size_t i = 0; i < n; ++i) {
         if (cancel && (i & 0xFFFF) == 0 && cancel->load()) break;
         if (progress && (i & 0xFFFF) == 0 && n) progress->store((float)((double)i / (double)n));
         SIZE_T got = 0;
-        if (!ReadProcessMemory(h_, (LPCVOID)results_[i], tmp, ts, &got) || got != ts) continue;
+        if (!ReadProcessMemory(h_, (LPCVOID)rr[i], tmp, ts, &got) || got != ts) continue;
         double cur = read_as_double(tmp, stype_);
-        double prev = last_[i];
+        double prev = ll[i];
         bool ok = false;
         switch (c) {
             case ScanCompare::Exact: ok = approx(cur, value, stype_); break;
@@ -397,13 +430,14 @@ size_t Target::next_scan(ScanCompare c, double value,
             case ScanCompare::Decreased: ok = cur < prev; break;
         }
         if (ok) {
-            keep.push_back(results_[i]);
+            keep.push_back(rr[i]);
             keepLast.push_back(cur);
         }
     }
+    if (progress) progress->store(1.0f);
+    std::lock_guard<std::mutex> lk(mtx_);
     results_.swap(keep);
     last_.swap(keepLast);
-    if (progress) progress->store(1.0f);
     return results_.size();
 }
 
