@@ -202,32 +202,40 @@ static void draw(Runner& r) {
         return;
     }
 
-    if (ImGui::BeginTable("cheats", 4,
+    if (ImGui::BeginTable("cheats", 5,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupColumn("Feature");
-        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 60);
-        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 90);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 42);
+        ImGui::TableSetupColumn("Now", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 78);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 96);
         ImGui::TableHeadersRow();
         for (size_t i = 0; i < r.doc.cheats.size(); ++i) {
             hx::Cheat& c = r.doc.cheats[i];
             ImGui::TableNextRow();
             ImGui::PushID((int)i);
+
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(c.label);
+            if (c.mode == 0 && c.freeze)
+                ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "* %s", c.label);
+            else
+                ImGui::TextUnformatted(c.label);
+
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(c.hotkey ? hx::hk_name(c.hotkey) : "-");
+
             ImGui::TableSetColumnIndex(2);
-            if (c.mode == 0) {
-                if (c.freeze) ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "ON");
-                else ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.65f, 1), "OFF");
-            } else {
-                ImGui::TextColored(ImVec4(0.3f, 0.66f, 1.0f, 1), "set %s", c.value);
-            }
+            ImGui::TextUnformatted(ok ? hx::fmt_value_at(r.target, c.addr, hx::scan_type_of(c.type)).c_str() : "-");
+
+            // Editable amount: change ammo/money here without recreating anything.
             ImGui::TableSetColumnIndex(3);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##v", c.value, sizeof(c.value));
+
+            ImGui::TableSetColumnIndex(4);
             if (!ok) ImGui::BeginDisabled();
             if (c.mode == 0) {
-                if (ImGui::SmallButton(c.freeze ? "Turn off" : "Turn on")) c.freeze = !c.freeze;
+                ImGui::Checkbox("freeze", &c.freeze);
             } else {
                 if (ImGui::SmallButton("Activate")) fire_set_once(r, (int)i);
             }
@@ -238,8 +246,8 @@ static void draw(Runner& r) {
     }
 
     ImGui::Separator();
-    ImGui::TextDisabled("Toggle cheats lock a value on/off. Set-once cheats write a value when fired.");
-    ImGui::TextDisabled("Hotkeys work even while the game is focused. Made with Hexforge.");
+    ImGui::TextDisabled("Edit the Value box to change the amount live (e.g. type a new ammo count) - no need to remake a cheat.");
+    ImGui::TextDisabled("Toggle: freeze locks the value every frame (infinite). Set once: writes the value now. Hotkeys work in-game. Made with Hexforge.");
     ImGui::End();
 }
 

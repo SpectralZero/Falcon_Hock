@@ -195,6 +195,11 @@ struct App {
     std::string scanStatus = "no scan yet";
     bool hasScanned = false;
 
+    // live single-address write (poke) opened from a scanner result
+    uintptr_t editAddr = 0;
+    char editBuf[64] = "";
+    bool wantEditPopup = false;
+
     // background scan worker
     std::thread scanThread;
     std::atomic<bool> scanning{false};
@@ -505,12 +510,13 @@ static void drawScanner(App& app) {
         app.addlog("wrote value to " + std::to_string(all.size()) + " addresses");
     }
     if (!attached || noResults) ImGui::EndDisabled();
+    ImGui::TextDisabled("Writes go straight into the game (no trainer needed): a row's [Set] pokes the 'new value' into that one address; right-click -> Edit value to type a value; [Apply to all] writes every result.");
 
     ImGui::BeginChild("results", ImVec2(0, 0), true);
     if (ImGui::BeginTable("res", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupColumn("Address");
-        ImGui::TableSetupColumn("Value");
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn("Value (live)");
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 130);
         ImGui::TableHeadersRow();
         // Iterate a private copy: the worker thread may rewrite the live
         // result set at any time, so never hold a reference into it.
@@ -528,6 +534,12 @@ static void drawScanner(App& app) {
             }
             if (ImGui::BeginPopupContextItem()) {
                 if (ImGui::MenuItem("Add to Trainer")) add_cheat_from(app, res[i], app.scanType);
+                if (ImGui::MenuItem("Edit value (write live)")) {
+                    app.editAddr = res[i];
+                    snprintf(app.editBuf, sizeof(app.editBuf), "%s",
+                             fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
+                    app.wantEditPopup = true;
+                }
                 if (ImGui::MenuItem("Browse in Hex")) snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)res[i]);
                 if (ImGui::MenuItem("Disassemble")) snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)res[i]);
                 if (ImGui::MenuItem("Pointer scan")) snprintf(app.ptrAddr, sizeof(app.ptrAddr), "%llX", (unsigned long long)res[i]);
@@ -538,6 +550,11 @@ static void drawScanner(App& app) {
             ImGui::TextUnformatted(fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
             ImGui::TableSetColumnIndex(2);
             ImGui::PushID((int)i);
+            if (ImGui::SmallButton("Set")) {
+                writeTyped(app, res[i], scanTypeOf(app.scanType), strtod(app.setValue, nullptr));
+                app.addlog("set " + std::string(a) + " = " + app.setValue);
+            }
+            ImGui::SameLine();
             if (ImGui::SmallButton("+cheat")) add_cheat_from(app, res[i], app.scanType);
             ImGui::PopID();
         }
@@ -546,6 +563,26 @@ static void drawScanner(App& app) {
             ImGui::TextDisabled("... %zu more (showing first %zu). Narrow further with Next Scan.", resultCount - shown, shown);
     }
     ImGui::EndChild();
+
+    // Live single-address poke (right-click a result -> Edit value). This writes
+    // straight into the running game so you can test a value with no trainer.
+    if (app.wantEditPopup) { ImGui::OpenPopup("poke_value"); app.wantEditPopup = false; }
+    if (ImGui::BeginPopup("poke_value")) {
+        ImGui::Text("Write live to %016llX", (unsigned long long)app.editAddr);
+        ImGui::SetNextItemWidth(180);
+        bool enter = ImGui::InputText("value", app.editBuf, sizeof(app.editBuf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::Button("Write") || enter) {
+            writeTyped(app, app.editAddr, scanTypeOf(app.scanType), strtod(app.editBuf, nullptr));
+            char ab[20];
+            snprintf(ab, sizeof(ab), "%llX", (unsigned long long)app.editAddr);
+            app.addlog("wrote live " + std::string(ab) + " = " + app.editBuf);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }
 
 // Interpret the bytes at an address as every common type at once. This is the
@@ -1132,7 +1169,8 @@ static void drawTrainer(App& app) {
 
     if (!app.exportStatus.empty())
         ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "%s", app.exportStatus.c_str());
-    ImGui::TextDisabled("Mode Toggle = hotkey flips Freeze on/off (god mode). Mode Set once = hotkey writes the value once (give ammo). "
+    ImGui::TextDisabled("To change an amount (e.g. ammo), just edit its Value box and click Set - keep the same cheat, no need to add a new one. "
+                        "Mode Toggle = Freeze/hotkey locks the value on/off (god mode, infinite ammo). Mode Set once = hotkey writes it one time. "
                         "Export bundles the table into a shareable single .exe that auto-finds the game.");
     ImGui::Separator();
 
