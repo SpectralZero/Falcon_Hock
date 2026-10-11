@@ -6,7 +6,8 @@
 
 namespace hx {
 
-const char kTrainerMagic[8] = "HXFTRN1";   // 7 chars + NUL = 8 bytes
+const char kTrainerMagic[8]  = "HXFTRN1";   // 7 chars + NUL = 8 bytes
+const char kTrainerMagic2[8] = "HXFTRN2";   // v2: text + embedded cover image
 
 static std::string sanitize(const std::string& in) {
     std::string o;
@@ -22,11 +23,15 @@ std::string serialize_trainer(const TrainerDoc& doc) {
     std::string o = "HEXFORGE1\n";
     o += "#TITLE=" + sanitize(doc.title) + "\n";
     o += "#TARGET=" + sanitize(doc.target) + "\n";
+    if (!doc.github.empty())    o += "#GITHUB=" + sanitize(doc.github) + "\n";
+    if (!doc.discord.empty())   o += "#DISCORD=" + sanitize(doc.discord) + "\n";
+    if (!doc.imageName.empty()) o += "#IMAGE=" + sanitize(doc.imageName) + "\n";
     for (const auto& c : doc.cheats) {
-        char line[320];
-        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d\n",
+        char line[512];
+        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d|%s\n",
                  sanitize(c.label).c_str(), (unsigned long long)c.addr, c.type,
-                 sanitize(c.value).c_str(), c.freeze ? 1 : 0, c.hotkey, c.mode);
+                 sanitize(c.value).c_str(), c.freeze ? 1 : 0, c.hotkey, c.mode,
+                 sanitize(c.note).c_str());
         o += line;
     }
     return o;
@@ -52,15 +57,18 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
                 std::string val = line.substr(eq + 1);
                 if (key == "TITLE") out.title = val;
                 else if (key == "TARGET") out.target = val;
+                else if (key == "GITHUB") out.github = val;
+                else if (key == "DISCORD") out.discord = val;
+                else if (key == "IMAGE") out.imageName = val;
             }
             continue;
         }
 
-        // cheat line: label|addr|type|value|freeze|hotkey|mode
-        std::string f[7];
+        // cheat line: label|addr|type|value|freeze|hotkey|mode|note
+        std::string f[8];
         int nf = 0;
         size_t start = 0;
-        for (size_t i = 0; i <= line.size() && nf < 7; ++i) {
+        for (size_t i = 0; i <= line.size() && nf < 8; ++i) {
             if (i == line.size() || line[i] == '|') {
                 f[nf++] = line.substr(start, i - start);
                 start = i + 1;
@@ -76,6 +84,7 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
             c.freeze = atoi(f[4].c_str()) != 0;
             c.hotkey = atoi(f[5].c_str());
             c.mode = (nf >= 7) ? atoi(f[6].c_str()) : 0;
+            if (nf >= 8) snprintf(c.note, sizeof(c.note), "%s", f[7].c_str());
             out.cheats.push_back(c);
         }
     }
@@ -95,23 +104,38 @@ bool read_embedded_trainer(TrainerDoc& out) {
 
     char magic[8] = {};
     _fseeki64(f, sz - 8, SEEK_SET);
-    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, kTrainerMagic, 8) != 0) {
-        fclose(f);
-        return false;
+    if (fread(magic, 1, 8, f) != 8) { fclose(f); return false; }
+
+    auto read_at = [&](long long off, void* dst, size_t n) -> bool {
+        _fseeki64(f, off, SEEK_SET);
+        return fread(dst, 1, n, f) == n;
+    };
+
+    bool ok = false;
+    if (memcmp(magic, kTrainerMagic2, 8) == 0 && sz >= 24) {
+        uint64_t textLen = 0, imgLen = 0;
+        if (read_at(sz - 24, &textLen, 8) && read_at(sz - 16, &imgLen, 8) &&
+            textLen > 0 && (long long)(textLen + imgLen) <= sz - 24) {
+            std::string text(textLen, 0);
+            long long textOff = sz - 24 - (long long)imgLen - (long long)textLen;
+            if (read_at(textOff, text.data(), (size_t)textLen) && parse_trainer(text, out)) {
+                if (imgLen > 0) {
+                    out.image.resize((size_t)imgLen);
+                    read_at(sz - 24 - (long long)imgLen, out.image.data(), (size_t)imgLen);
+                }
+                ok = true;
+            }
+        }
+    } else if (memcmp(magic, kTrainerMagic, 8) == 0) {
+        uint64_t len = 0;
+        if (read_at(sz - 16, &len, 8) && len > 0 && (long long)len <= sz - 16) {
+            std::string text(len, 0);
+            if (read_at(sz - 16 - (long long)len, text.data(), (size_t)len))
+                ok = parse_trainer(text, out);
+        }
     }
-    uint64_t len = 0;
-    _fseeki64(f, sz - 16, SEEK_SET);
-    if (fread(&len, 1, 8, f) != 8 || len == 0 || (long long)len > sz - 16) {
-        fclose(f);
-        return false;
-    }
-    std::string payload;
-    payload.resize((size_t)len);
-    _fseeki64(f, sz - 16 - (long long)len, SEEK_SET);
-    size_t got = fread(payload.data(), 1, (size_t)len, f);
     fclose(f);
-    if (got != (size_t)len) return false;
-    return parse_trainer(payload, out);
+    return ok;
 }
 
 bool append_trainer_overlay(const std::wstring& exe_path, const TrainerDoc& doc) {
@@ -119,10 +143,20 @@ bool append_trainer_overlay(const std::wstring& exe_path, const TrainerDoc& doc)
     FILE* f = nullptr;
     _wfopen_s(&f, exe_path.c_str(), L"ab");
     if (!f) return false;
-    uint64_t len = payload.size();
     bool ok = fwrite(payload.data(), 1, payload.size(), f) == payload.size();
-    ok = ok && fwrite(&len, 1, 8, f) == 8;
-    ok = ok && fwrite(kTrainerMagic, 1, 8, f) == 8;
+    if (!doc.image.empty()) {
+        // v2: text + image
+        ok = ok && fwrite(doc.image.data(), 1, doc.image.size(), f) == doc.image.size();
+        uint64_t textLen = payload.size(), imgLen = doc.image.size();
+        ok = ok && fwrite(&textLen, 1, 8, f) == 8;
+        ok = ok && fwrite(&imgLen, 1, 8, f) == 8;
+        ok = ok && fwrite(kTrainerMagic2, 1, 8, f) == 8;
+    } else {
+        // v1: text only
+        uint64_t len = payload.size();
+        ok = ok && fwrite(&len, 1, 8, f) == 8;
+        ok = ok && fwrite(kTrainerMagic, 1, 8, f) == 8;
+    }
     fclose(f);
     return ok;
 }

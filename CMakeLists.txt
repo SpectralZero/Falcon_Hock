@@ -203,6 +203,7 @@ target_link_libraries(hexforge_trainer PRIVATE
     imgui::imgui
     d3d11 dxgi d3dcompiler
     user32 gdi32 advapi32
+    windowscodecs ole32 shell32
 )
 if(MSVC)
     target_link_options(hexforge_trainer PRIVATE

@@ -25,12 +25,17 @@ struct Cheat {
     int mode = 0;            // 0 = toggle freeze, 1 = set once
     char label[48] = "value";
     char value[32] = "0";
+    char note[128] = "";     // optional "!" tip shown in the trainer (e.g. game caps)
 };
 
 // A whole trainer: a titled list of cheats bound to one target process.
 struct TrainerDoc {
     std::string title = "My Trainer";
-    std::string target;      // process exe name, e.g. "re3.exe"
+    std::string target;              // process exe name, e.g. "re3.exe"
+    std::string github;              // optional community link
+    std::string discord;             // optional community link
+    std::string imageName;           // original cover-image filename (info only)
+    std::vector<uint8_t> image;      // optional cover image bytes (PNG/JPG), embedded
     std::vector<Cheat> cheats;
 };
 
@@ -101,9 +106,12 @@ std::string serialize_trainer(const TrainerDoc& doc);
 bool parse_trainer(const std::string& text, TrainerDoc& out);
 
 // Overlay embedding: an exported trainer .exe carries its TrainerDoc appended
-// to the end of the file as [payload][u64 len][8-byte magic]. These read/write
-// that overlay so a single shared .exe can double as any game's trainer.
-extern const char kTrainerMagic[8];   // "HXFTRN1"
+// to the end of the file. v1 is text-only; v2 also carries the cover image:
+//   v1: [text][u64 len]["HXFTRN1"]
+//   v2: [text][image][u64 textLen][u64 imageLen]["HXFTRN2"]
+// read_embedded_trainer understands both.
+extern const char kTrainerMagic[8];    // "HXFTRN1"
+extern const char kTrainerMagic2[8];   // "HXFTRN2"
 bool read_embedded_trainer(TrainerDoc& out);                      // from own exe
 bool append_trainer_overlay(const std::wstring& exe_path, const TrainerDoc& doc);
 

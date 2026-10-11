@@ -235,6 +235,9 @@ struct App {
     std::vector<Cheat> cheats;
     char trainerFile[64] = "cheats.hexforge";
     char trainerTitle[64] = "My Trainer";
+    char trainerGithub[160] = "";
+    char trainerDiscord[160] = "";
+    char trainerImage[300] = "";   // path to a cover image (png/jpg) to embed
     std::string exportStatus;
     bool hotkeysDirty = false;
     bool gotoTrainer = false;   // wizard asks the UI to open the Trainer tab
@@ -924,6 +927,8 @@ static hx::TrainerDoc trainer_doc(App& app) {
     hx::TrainerDoc d;
     d.title = app.trainerTitle[0] ? app.trainerTitle : "Hexforge Trainer";
     d.target = !app.attachedName.empty() ? app.attachedName : app.selectedName;
+    d.github = app.trainerGithub;
+    d.discord = app.trainerDiscord;
     d.cheats = app.cheats;
     return d;
 }
@@ -960,6 +965,8 @@ static void load_trainer(App& app) {
     if (!hx::parse_trainer(text, d)) { app.addlog("load failed: not a hexforge trainer file"); return; }
     app.cheats = d.cheats;
     if (!d.title.empty()) snprintf(app.trainerTitle, sizeof(app.trainerTitle), "%s", d.title.c_str());
+    if (!d.github.empty()) snprintf(app.trainerGithub, sizeof(app.trainerGithub), "%s", d.github.c_str());
+    if (!d.discord.empty()) snprintf(app.trainerDiscord, sizeof(app.trainerDiscord), "%s", d.discord.c_str());
     if (!d.target.empty() && app.attachedName.empty()) app.attachedName = d.target;
     app.hotkeysDirty = true;
     app.addlog(std::string("loaded ") + app.trainerFile + " (" + std::to_string(app.cheats.size()) + " cheats)");
@@ -988,6 +995,21 @@ static void export_trainer(App& app) {
     if (safe.empty()) safe = "Hexforge Trainer";
     std::wstring outPath = exe_dir() + widen(safe) + L".exe";
 
+    // Embed an optional cover image (read the raw PNG/JPG bytes).
+    if (app.trainerImage[0]) {
+        std::wstring imgPath = widen(app.trainerImage);
+        std::string bytes = read_whole_file(imgPath);
+        if (bytes.empty()) {
+            app.exportStatus = "image not found: " + std::string(app.trainerImage);
+            app.addlog(app.exportStatus);
+            return;
+        }
+        d.image.assign(bytes.begin(), bytes.end());
+        std::string p = app.trainerImage;
+        size_t slash = p.find_last_of("\\/");
+        d.imageName = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    }
+
     if (!CopyFileW(base.c_str(), outPath.c_str(), FALSE)) {
         app.exportStatus = "could not write the trainer exe (error " + std::to_string(GetLastError()) + ")";
         app.addlog(app.exportStatus);
@@ -999,7 +1021,8 @@ static void export_trainer(App& app) {
         return;
     }
     app.exportStatus = "exported " + safe + ".exe  (targets " + d.target + ", " +
-                       std::to_string(d.cheats.size()) + " cheats) next to the tool";
+                       std::to_string(d.cheats.size()) + " cheats" +
+                       (d.image.empty() ? "" : ", +image") + ") next to the tool";
     app.addlog(app.exportStatus);
 }
 
@@ -1167,11 +1190,26 @@ static void drawTrainer(App& app) {
                       : (app.selectedName.empty() ? "(attach a game)" : app.selectedName.c_str());
     ImGui::TextDisabled("target: %s", tgt);
 
+    // Branding that gets baked into the exported trainer.
+    ImGui::SetNextItemWidth(150); ImGui::InputTextWithHint("##gh", "GitHub URL", app.trainerGithub, sizeof(app.trainerGithub));
+    ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::InputTextWithHint("##dc", "Discord URL", app.trainerDiscord, sizeof(app.trainerDiscord));
+    ImGui::SameLine(); ImGui::SetNextItemWidth(230); ImGui::InputTextWithHint("##img", "cover image path (.png/.jpg)", app.trainerImage, sizeof(app.trainerImage));
+    ImGui::SameLine();
+    if (ImGui::Button("Clear img")) app.trainerImage[0] = 0;
+    ImGui::SameLine();
+    if (app.trainerImage[0]) {
+        bool ok = GetFileAttributesW(widen(app.trainerImage).c_str()) != INVALID_FILE_ATTRIBUTES;
+        ImGui::TextColored(ok ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(1, 0.4f, 0.4f, 1),
+                           ok ? "image ok" : "image not found");
+    } else {
+        ImGui::TextDisabled("image: none");
+    }
+
     if (!app.exportStatus.empty())
         ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "%s", app.exportStatus.c_str());
     ImGui::TextDisabled("To change an amount (e.g. ammo), just edit its Value box and click Set - keep the same cheat, no need to add a new one. "
                         "Mode Toggle = Freeze/hotkey locks the value on/off (god mode, infinite ammo). Mode Set once = hotkey writes it one time. "
-                        "Export bundles the table into a shareable single .exe that auto-finds the game.");
+                        "Per-row [i] adds a note (e.g. in-game caps). GitHub/Discord/image are baked into the exported .exe.");
     ImGui::Separator();
 
     if (app.cheats.empty()) {
@@ -1231,6 +1269,16 @@ static void drawTrainer(App& app) {
             ImGui::TableSetColumnIndex(8);
             if (ImGui::SmallButton("Set"))
                 writeTyped(app, c.addr, scanTypeOf(c.type), strtod(c.value, nullptr));
+            ImGui::SameLine();
+            // Note editor: "i" (filled if a note exists) opens a small popup.
+            if (ImGui::SmallButton(c.note[0] ? "i*" : "i")) ImGui::OpenPopup("note");
+            if (ImGui::IsItemHovered() && c.note[0]) ImGui::SetTooltip("%s", c.note);
+            if (ImGui::BeginPopup("note")) {
+                ImGui::TextDisabled("Tip shown in the trainer (e.g. game caps this at 60):");
+                ImGui::SetNextItemWidth(320);
+                ImGui::InputText("##note", c.note, sizeof(c.note));
+                ImGui::EndPopup();
+            }
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeIdx = (int)i;
             ImGui::PopID();

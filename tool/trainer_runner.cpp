@@ -17,11 +17,14 @@
 #include "imgui_impl_dx11.h"
 #include <d3d11.h>
 #include <dxgi.h>
+#include <shellapi.h>
+#include <wincodec.h>
 
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <ctime>
+#include <cmath>
 
 // ── D3D11 plumbing ───────────────────────────────────────────────────────────
 static ID3D11Device*           g_device = nullptr;
@@ -29,6 +32,127 @@ static ID3D11DeviceContext*    g_ctx = nullptr;
 static IDXGISwapChain*         g_swap = nullptr;
 static ID3D11RenderTargetView* g_rtv = nullptr;
 static UINT                    g_resizeW = 0, g_resizeH = 0;
+
+// ── Logo texture ─────────────────────────────────────────────────────────────
+static ID3D11ShaderResourceView* g_logoSRV = nullptr;
+static int g_logoW = 0, g_logoH = 0;
+
+static ID3D11ShaderResourceView* LoadIconTexture(ID3D11Device* dev, HINSTANCE hInst,
+                                                  int resId, int* outW, int* outH) {
+    HICON hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(resId),
+                                    IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+    if (!hIcon) hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(resId),
+                                          IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
+    if (!hIcon) return nullptr;
+
+    ICONINFO ii = {};
+    if (!GetIconInfo(hIcon, &ii)) { DestroyIcon(hIcon); return nullptr; }
+    BITMAP bm = {};
+    GetObject(ii.hbmColor ? ii.hbmColor : ii.hbmMask, sizeof(bm), &bm);
+    int w = bm.bmWidth, h = bm.bmHeight;
+    if (w <= 0 || h <= 0) {
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        DestroyIcon(hIcon); return nullptr;
+    }
+
+    HDC hdc = GetDC(nullptr);
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    std::vector<uint8_t> px(w * h * 4);
+    GetDIBits(hdc, ii.hbmColor, 0, h, px.data(), &bi, DIB_RGB_COLORS);
+    ReleaseDC(nullptr, hdc);
+
+    for (int i = 0; i < w * h; ++i) {
+        std::swap(px[i * 4 + 0], px[i * 4 + 2]);
+        if (px[i * 4 + 3] == 0 && (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]))
+            px[i * 4 + 3] = 255;
+    }
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    DestroyIcon(hIcon);
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd = {};
+    sd.pSysMem = px.data(); sd.SysMemPitch = w * 4;
+    ID3D11Texture2D* tex = nullptr;
+    dev->CreateTexture2D(&td, &sd, &tex);
+    if (!tex) return nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    dev->CreateShaderResourceView(tex, nullptr, &srv);
+    tex->Release();
+    if (outW) *outW = w;
+    if (outH) *outH = h;
+    return srv;
+}
+
+// ── Cover image (decoded from embedded PNG/JPG via WIC) ──────────────────────
+static ID3D11ShaderResourceView* g_gameSRV = nullptr;
+static int g_gameW = 0, g_gameH = 0;
+
+static ID3D11ShaderResourceView* LoadTextureFromImageBytes(ID3D11Device* dev,
+                                                           const uint8_t* data, size_t size,
+                                                           int* outW, int* outH) {
+    if (!data || size == 0) return nullptr;
+    IWICImagingFactory* fac = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&fac))))
+        return nullptr;
+
+    ID3D11ShaderResourceView* srv = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* dec = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* conv = nullptr;
+    do {
+        if (FAILED(fac->CreateStream(&stream))) break;
+        if (FAILED(stream->InitializeFromMemory((BYTE*)data, (DWORD)size))) break;
+        if (FAILED(fac->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &dec))) break;
+        if (FAILED(dec->GetFrame(0, &frame))) break;
+        if (FAILED(fac->CreateFormatConverter(&conv))) break;
+        if (FAILED(conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                                    nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+            break;
+        UINT w = 0, h = 0;
+        conv->GetSize(&w, &h);
+        if (!w || !h) break;
+        std::vector<uint8_t> px((size_t)w * h * 4);
+        if (FAILED(conv->CopyPixels(nullptr, w * 4, (UINT)px.size(), px.data()))) break;
+
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd = {};
+        sd.pSysMem = px.data(); sd.SysMemPitch = w * 4;
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(dev->CreateTexture2D(&td, &sd, &tex)) && tex) {
+            dev->CreateShaderResourceView(tex, nullptr, &srv);
+            tex->Release();
+            if (outW) *outW = (int)w;
+            if (outH) *outH = (int)h;
+        }
+    } while (false);
+
+    if (conv) conv->Release();
+    if (frame) frame->Release();
+    if (dec) dec->Release();
+    if (stream) stream->Release();
+    fac->Release();
+    return srv;
+}
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -148,12 +272,71 @@ static void maintain_attach(Runner& r, double now) {
     }
 }
 
+// ── Styled link-button helper (with a drawn GitHub/Discord glyph) ────────────
+enum LinkIcon { LINK_NONE = 0, LINK_GITHUB = 1, LINK_DISCORD = 2 };
+
+static void draw_github_glyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+    // Simplified Octocat: round head, two ears, two eyes, little tail.
+    dl->AddCircleFilled(c, r, col, 24);
+    dl->AddTriangleFilled(ImVec2(c.x - r * 0.75f, c.y - r * 0.55f),
+                          ImVec2(c.x - r * 0.15f, c.y - r * 0.55f),
+                          ImVec2(c.x - r * 0.45f, c.y - r * 1.15f), col);
+    dl->AddTriangleFilled(ImVec2(c.x + r * 0.75f, c.y - r * 0.55f),
+                          ImVec2(c.x + r * 0.15f, c.y - r * 0.55f),
+                          ImVec2(c.x + r * 0.45f, c.y - r * 1.15f), col);
+    ImU32 eye = IM_COL32(20, 22, 30, 255);
+    dl->AddCircleFilled(ImVec2(c.x - r * 0.33f, c.y + r * 0.05f), r * 0.17f, eye, 10);
+    dl->AddCircleFilled(ImVec2(c.x + r * 0.33f, c.y + r * 0.05f), r * 0.17f, eye, 10);
+    dl->AddBezierQuadratic(ImVec2(c.x + r * 0.9f, c.y + r * 0.4f),
+                           ImVec2(c.x + r * 1.25f, c.y + r * 0.9f),
+                           ImVec2(c.x + r * 0.6f, c.y + r * 1.1f), col, 2.0f);
+}
+
+static void draw_discord_glyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+    // Rounded "Clyde" face: pill body + two white eyes.
+    ImVec2 a(c.x - r * 1.05f, c.y - r * 0.7f), b(c.x + r * 1.05f, c.y + r * 0.75f);
+    dl->AddRectFilled(a, b, col, r * 0.7f);
+    dl->AddTriangleFilled(ImVec2(c.x - r * 0.5f, b.y - r * 0.1f),
+                          ImVec2(c.x - r * 0.1f, b.y - r * 0.1f),
+                          ImVec2(c.x - r * 0.5f, b.y + r * 0.5f), col);
+    ImU32 eye = IM_COL32(255, 255, 255, 255);
+    dl->AddCircleFilled(ImVec2(c.x - r * 0.42f, c.y + r * 0.02f), r * 0.22f, eye, 12);
+    dl->AddCircleFilled(ImVec2(c.x + r * 0.42f, c.y + r * 0.02f), r * 0.22f, eye, 12);
+}
+
+static void DrawLinkButton(const char* id, const char* label, const std::string& url, int icon,
+                           ImU32 bgCol, ImU32 bgHoverCol, ImU32 borderCol, float width, float height = 36.0f) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(width, height));
+    bool hov = ImGui::IsItemHovered();
+    bool has = !url.empty();
+    if (ImGui::IsItemClicked() && has) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), (int)url.size(), nullptr, 0);
+        std::wstring w(n, 0);
+        MultiByteToWideChar(CP_UTF8, 0, url.c_str(), (int)url.size(), w.data(), n);
+        ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), hov ? bgHoverCol : bgCol, 6.0f);
+    dl->AddRect(p, ImVec2(p.x + width, p.y + height), borderCol, 6.0f, 0, 1.4f);
+    ImU32 fg = IM_COL32(255, 255, 255, (hov && has) ? 255 : 190);
+    float gr = height * 0.28f;
+    ImVec2 gc(p.x + 6 + gr, p.y + height * 0.5f);
+    if (icon == LINK_GITHUB) draw_github_glyph(dl, gc, gr, fg);
+    else if (icon == LINK_DISCORD) draw_discord_glyph(dl, gc, gr, fg);
+    ImVec2 ts = ImGui::CalcTextSize(label);
+    float textX = icon ? (gc.x + gr + 8) : (p.x + (width - ts.x) * 0.5f);
+    dl->AddText(ImVec2(textX, p.y + (height - ts.y) * 0.5f), fg, label);
+    if (hov && has) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+}
+
 static void StyleTrainer() {
     ImGui::StyleColorsDark();
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding = 0;
     s.FrameRounding = 6;
     s.GrabRounding = 6;
+    s.ChildRounding = 4;
     s.WindowPadding = ImVec2(16, 14);
     s.FramePadding = ImVec2(8, 5);
     s.ItemSpacing = ImVec2(8, 8);
@@ -185,69 +368,182 @@ static void draw(Runner& r) {
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.49f, 0.36f, 1.0f, 1.0f));
-    ImGui::SetWindowFontScale(1.6f);
-    ImGui::TextUnformatted(r.doc.title.empty() ? "Trainer" : r.doc.title.c_str());
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::PopStyleColor();
+    // ── Top bar: logo icon + title + status ──────────────────────────────────
+    const float logoSize = 42.0f;
+    if (g_logoSRV) {
+        ImGui::Image((ImTextureID)g_logoSRV, ImVec2(logoSize, logoSize));
+        ImGui::SameLine();
+        // vertically nudge text to align with icon center
+        float offsetY = (logoSize - ImGui::GetTextLineHeight() * 2.0f - ImGui::GetStyle().ItemSpacing.y) * 0.5f;
+        if (offsetY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offsetY);
+    }
+    ImGui::BeginGroup();
+    {
+        // Glitch title: broken-light letter replacement every ~3.7s
+        const char* titleText = r.doc.title.empty() ? "Trainer" : r.doc.title.c_str();
+        ImGui::SetWindowFontScale(1.5f);
+        ImVec2 titlePos = ImGui::GetCursorScreenPos();
+        ImVec2 titleSize = ImGui::CalcTextSize(titleText);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImFont* font = ImGui::GetFont();
+        float fontSize = ImGui::GetFontSize();
 
+        double now = (double)GetTickCount64() / 1000.0;
+        double phase = fmod(now, 3.7);
+        // Two quick flickers: 0-120ms and 160-210ms (broken light feel)
+        bool glitching = (phase < 0.12) || (phase > 0.16 && phase < 0.21);
+
+        if (glitching) {
+            // Build a glitched copy: replace ~35% of letters with symbols
+            static const char syms[] = "#@$!%&*_=+<>?/|~^";
+            std::string g = titleText;
+            unsigned seed = (unsigned)(now * 837.0);
+            for (size_t i = 0; i < g.size(); ++i) {
+                seed = seed * 1103515245u + 12345u;
+                if (g[i] != ' ' && ((seed >> 16) % 100) < 35)
+                    g[i] = syms[(seed >> 8) % (sizeof(syms) - 1)];
+            }
+            // Chromatic split during glitch
+            float jitter = ((seed % 5) - 2) * 1.0f;
+            dl->AddText(font, fontSize, ImVec2(titlePos.x + 2.5f + jitter, titlePos.y),
+                        IM_COL32(255, 50, 80, 70), g.c_str());
+            dl->AddText(font, fontSize, ImVec2(titlePos.x - 2.0f, titlePos.y + 1.0f),
+                        IM_COL32(60, 200, 255, 60), g.c_str());
+            dl->AddText(font, fontSize, titlePos, IM_COL32(125, 92, 255, 255), g.c_str());
+        } else {
+            // Clean title
+            dl->AddText(font, fontSize, titlePos, IM_COL32(125, 92, 255, 255), titleText);
+        }
+
+        ImGui::Dummy(titleSize);
+        ImGui::SetWindowFontScale(1.0f);
+    }
     bool ok = r.attached;
     ImGui::TextColored(ok ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(1.0f, 0.71f, 0.33f, 1),
                        "%s%s", ok ? "> " : "... ", r.status.c_str());
+    ImGui::EndGroup();
     ImGui::Separator();
 
-    if (r.doc.cheats.empty()) {
-        ImGui::TextWrapped("This trainer has no cheats embedded.");
-        ImGui::End();
-        return;
-    }
+    // ── Main content: left panel (game image + links) | right panel (cheats) ─
+    float availW = ImGui::GetContentRegionAvail().x;
+    float availH = ImGui::GetContentRegionAvail().y;
+    float leftW = availW * 0.24f;
+    float gap = ImGui::GetStyle().ItemSpacing.x;
 
-    if (ImGui::BeginTable("cheats", 5,
-                          ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
-        ImGui::TableSetupColumn("Feature");
-        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 42);
-        ImGui::TableSetupColumn("Now", ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 78);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 96);
-        ImGui::TableHeadersRow();
-        for (size_t i = 0; i < r.doc.cheats.size(); ++i) {
-            hx::Cheat& c = r.doc.cheats[i];
-            ImGui::TableNextRow();
-            ImGui::PushID((int)i);
+    // ── Left panel ───────────────────────────────────────────────────────────
+    ImGui::BeginChild("##left_panel", ImVec2(leftW, availH), ImGuiChildFlags_Borders);
+    {
+        float panelW = ImGui::GetContentRegionAvail().x;
 
-            ImGui::TableSetColumnIndex(0);
-            if (c.mode == 0 && c.freeze)
-                ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "* %s", c.label);
-            else
-                ImGui::TextUnformatted(c.label);
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(c.hotkey ? hx::hk_name(c.hotkey) : "-");
-
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(ok ? hx::fmt_value_at(r.target, c.addr, hx::scan_type_of(c.type)).c_str() : "-");
-
-            // Editable amount: change ammo/money here without recreating anything.
-            ImGui::TableSetColumnIndex(3);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##v", c.value, sizeof(c.value));
-
-            ImGui::TableSetColumnIndex(4);
-            if (!ok) ImGui::BeginDisabled();
-            if (c.mode == 0) {
-                ImGui::Checkbox("freeze", &c.freeze);
+        // Game cover: embedded image if present, else a placeholder.
+        float imgH = availH * 0.58f;
+        ImGui::BeginChild("##game_img", ImVec2(panelW, imgH), ImGuiChildFlags_Borders);
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImVec2 sz = ImGui::GetContentRegionAvail();
+            ImVec2 p1(p0.x + sz.x, p0.y + sz.y);
+            dl->AddRectFilledMultiColor(p0, p1,
+                IM_COL32(18, 20, 32, 255), IM_COL32(18, 20, 32, 255),
+                IM_COL32(30, 35, 55, 255), IM_COL32(30, 35, 55, 255));
+            if (g_gameSRV && g_gameW > 0 && g_gameH > 0) {
+                // Fit the image inside the box, preserving aspect ratio.
+                float scale = (std::min)(sz.x / g_gameW, sz.y / g_gameH);
+                float w = g_gameW * scale, h = g_gameH * scale;
+                ImVec2 a(p0.x + (sz.x - w) * 0.5f, p0.y + (sz.y - h) * 0.5f);
+                dl->AddImage((ImTextureID)g_gameSRV, a, ImVec2(a.x + w, a.y + h));
             } else {
-                if (ImGui::SmallButton("Activate")) fire_set_once(r, (int)i);
+                const char* ph = "Game Image";
+                ImVec2 ts = ImGui::CalcTextSize(ph);
+                dl->AddText(ImVec2(p0.x + (sz.x - ts.x) * 0.5f, p0.y + (sz.y - ts.y) * 0.5f),
+                            IM_COL32(100, 105, 130, 180), ph);
             }
-            if (!ok) ImGui::EndDisabled();
-            ImGui::PopID();
         }
-        ImGui::EndTable();
-    }
+        ImGui::EndChild();
 
-    ImGui::Separator();
-    ImGui::TextDisabled("Edit the Value box to change the amount live (e.g. type a new ammo count) - no need to remake a cheat.");
-    ImGui::TextDisabled("Toggle: freeze locks the value every frame (infinite). Set once: writes the value now. Hotkeys work in-game. Made with Hexforge.");
+        // Push buttons to bottom of left panel
+        float btnH = 36.0f;
+        float btnSpacing = 6.0f;
+        float totalBtnH = btnH * 2 + btnSpacing;
+        float remainH = ImGui::GetContentRegionAvail().y;
+        if (remainH > totalBtnH + 4)
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + remainH - totalBtnH - 4);
+
+        // GitHub + Discord: use the author's URLs baked into the trainer.
+        DrawLinkButton("##gh", "GitHub", r.doc.github, LINK_GITHUB,
+                       IM_COL32(22, 27, 38, 255), IM_COL32(35, 42, 58, 255),
+                       IM_COL32(60, 65, 90, 255), panelW, btnH);
+        ImGui::Spacing();
+        DrawLinkButton("##dc", "Discord", r.doc.discord, LINK_DISCORD,
+                       IM_COL32(40, 28, 80, 255), IM_COL32(58, 42, 110, 255),
+                       IM_COL32(88, 70, 150, 255), panelW, btnH);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ── Right panel: trainer controls ────────────────────────────────────────
+    ImGui::BeginChild("##right_panel", ImVec2(0, availH), ImGuiChildFlags_Borders);
+    {
+        if (r.doc.cheats.empty()) {
+            ImGui::TextWrapped("This trainer has no cheats embedded.");
+        } else {
+            if (ImGui::BeginTable("cheats", 5,
+                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+                ImGui::TableSetupColumn("Feature");
+                ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 42);
+                ImGui::TableSetupColumn("Now", ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 78);
+                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 96);
+                ImGui::TableHeadersRow();
+                for (size_t i = 0; i < r.doc.cheats.size(); ++i) {
+                    hx::Cheat& c = r.doc.cheats[i];
+                    ImGui::TableNextRow();
+                    ImGui::PushID((int)i);
+
+                    ImGui::TableSetColumnIndex(0);
+                    if (c.mode == 0 && c.freeze)
+                        ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "* %s", c.label);
+                    else
+                        ImGui::TextUnformatted(c.label);
+                    if (c.note[0]) {
+                        ImGui::SameLine(0, 4);
+                        ImGui::TextColored(ImVec4(0.3f, 0.66f, 1.0f, 1), "(i)");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.note);
+                    }
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(c.hotkey ? hx::hk_name(c.hotkey) : "-");
+
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(ok ? hx::fmt_value_at(r.target, c.addr, hx::scan_type_of(c.type)).c_str() : "-");
+
+                    // Editable amount: change ammo/money here without recreating anything.
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::InputText("##v", c.value, sizeof(c.value));
+
+                    ImGui::TableSetColumnIndex(4);
+                    if (!ok) ImGui::BeginDisabled();
+                    if (c.mode == 0) {
+                        ImGui::Checkbox("freeze", &c.freeze);
+                    } else {
+                        if (ImGui::SmallButton("Activate")) fire_set_once(r, (int)i);
+                    }
+                    if (!ok) ImGui::EndDisabled();
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        // Info text at bottom of right panel
+        ImGui::Separator();
+        ImGui::TextDisabled("Edit the Value box to change the amount live (e.g. type a new ammo count) - no need to remake a cheat.");
+        ImGui::TextDisabled("Toggle: freeze locks the value every frame (infinite). Set once: writes the value now. Hotkeys work in-game. Made with Hexforge.");
+    }
+    ImGui::EndChild();
+
     ImGui::End();
 }
 
@@ -271,6 +567,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         run.status = "no trainer data embedded in this exe";
     }
     hx::enable_debug_privilege();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // for WIC image decoding
 
     std::wstring wtitle(run.doc.title.begin(), run.doc.title.end());
 
@@ -286,7 +583,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, wtitle.c_str(), WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 560, 520, nullptr, nullptr, hInst, nullptr);
+                                CW_USEDEFAULT, CW_USEDEFAULT, 900, 600, nullptr, nullptr, hInst, nullptr);
     g_hwnd = hwnd;
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
@@ -302,6 +599,11 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     StyleTrainer();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_ctx);
+
+    g_logoSRV = LoadIconTexture(g_device, hInst, 101, &g_logoW, &g_logoH);
+    if (!run.doc.image.empty())
+        g_gameSRV = LoadTextureFromImageBytes(g_device, run.doc.image.data(),
+                                              run.doc.image.size(), &g_gameW, &g_gameH);
 
     sync_hotkeys(run);
 
@@ -339,6 +641,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
 
     for (int i = 0; i < 64; ++i) UnregisterHotKey(g_hwnd, HK_BASE + i);
+    if (g_logoSRV) { g_logoSRV->Release(); g_logoSRV = nullptr; }
+    if (g_gameSRV) { g_gameSRV->Release(); g_gameSRV = nullptr; }
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
