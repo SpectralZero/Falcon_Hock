@@ -23,6 +23,7 @@ struct Cheat {
     bool freeze = false;     // currently locking the value every frame
     int hotkey = 0;          // VK code (0 = none)
     int mode = 0;            // 0 = toggle freeze, 1 = set once
+    int freezeMode = 0;      // 0 = locked, 1 = no less than (floor), 2 = no more than (cap)
     char label[48] = "value";
     char value[32] = "0";
     char note[128] = "";     // optional "!" tip shown in the trainer (e.g. game caps)

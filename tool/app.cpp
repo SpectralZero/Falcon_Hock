@@ -11,6 +11,7 @@
 
 #include <Zydis/Zydis.h>
 #include <dbghelp.h>
+#include <commdlg.h>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -189,8 +190,12 @@ struct App {
 
     int scanType = 2;        // int32
     int scanCompare = 0;     // exact
+    int scanKind = 0;        // 0 value, 1 AOB pattern, 2 string
     char scanValue[64] = "";
     char setValue[64] = "";
+    char aobText[256] = "";
+    char strText[128] = "";
+    bool strUtf16 = false;
     bool writableOnly = true;
     std::string scanStatus = "no scan yet";
     bool hasScanned = false;
@@ -212,6 +217,8 @@ struct App {
     bool hexHasPrev = false;
     bool hexAuto = false;
     bool hexValid = false;
+    int hexSel = -1;             // selected byte offset for editing
+    char hexEditByte[8] = "";
 
     // pointer scanner
     char ptrAddr[32] = "";
@@ -223,13 +230,42 @@ struct App {
     // disassembler
     char disasmAddr[32] = "";
     std::vector<std::string> disasmLines;
+    std::vector<std::pair<uintptr_t, int>> disasmMeta;   // (addr, length) per line
+
+    // code patches (for revert)
+    struct Patch { uintptr_t addr; std::vector<uint8_t> orig; std::string desc; };
+    std::vector<Patch> patches;
+
+    // struct dissector
+    char structAddr[32] = "";
+    int structRows = 16;
+    int structStep = 8;          // bytes per row
+
+    // find-what-writes
+    hx::DebugWatch watch;
+    char watchAddr[32] = "";
+    int watchSize = 4;
+    bool watchWrite = true;
+
+    // quick watch list (live, not exported)
+    std::vector<Cheat> watches;
+
+    // settings
+    int accent = 0;              // 0 violet, 1 teal, 2 amber, 3 crimson
+    bool settingsLoaded = false;
+
+    // toast notifications
+    struct Toast { std::string text; double expire; };
+    std::vector<Toast> toasts;
+    void toast(const std::string& s) { toasts.push_back({s, (double)GetTickCount64() / 1000.0 + 3.0}); }
 
     // runtime (injected engine over IPC)
     hx::RuntimeClient rt;
-    char luaCode[2048] =
+    char luaCode[4096] =
         "local p = umf.resolve(\"kernel32.dll\", \"GetProcAddress\")\n"
         "umf.log(\"GetProcAddress @ \" .. tostring(p))\n";
     std::string rtOutput;
+    int luaSnippet = 0;
     std::unordered_set<uint32_t> runtimePids;
 
     std::vector<Cheat> cheats;
@@ -277,6 +313,28 @@ static std::string fmtValueAt(hx::Target& t, uintptr_t addr, hx::ScanType ty) {
 }
 static void writeTyped(App& app, uintptr_t addr, hx::ScanType ty, double v) {
     hx::write_typed(app.target, addr, ty, v);
+}
+static double readTyped(App& app, uintptr_t addr, hx::ScanType ty) {
+    uint8_t b[8] = {};
+    if (!app.target.read(addr, b, hx::type_size(ty))) return 0.0;
+    switch (ty) {
+        case hx::ScanType::I8: return *(int8_t*)b;
+        case hx::ScanType::I16: return *(int16_t*)b;
+        case hx::ScanType::I32: return *(int32_t*)b;
+        case hx::ScanType::I64: return (double)*(int64_t*)b;
+        case hx::ScanType::F32: return *(float*)b;
+        case hx::ScanType::F64: return *(double*)b;
+    }
+    return 0.0;
+}
+// Apply a freeze honoring its freeze mode: locked / no-less-than / no-more-than.
+static void apply_freeze(App& app, Cheat& c) {
+    hx::ScanType ty = scanTypeOf(c.type);
+    double target = strtod(c.value, nullptr);
+    if (c.freezeMode == 0) { writeTyped(app, c.addr, ty, target); return; }
+    double cur = readTyped(app, c.addr, ty);
+    if (c.freezeMode == 1 && cur < target) writeTyped(app, c.addr, ty, target);   // floor
+    else if (c.freezeMode == 2 && cur > target) writeTyped(app, c.addr, ty, target); // cap
 }
 
 static App* g_app = nullptr;
@@ -339,6 +397,45 @@ static void start_next_scan(App& app) {
     });
 }
 
+static void start_aob_scan(App& app) {
+    if (app.scanning.load()) return;
+    std::vector<uint8_t> pat;
+    std::vector<bool> mask;
+    if (!hx::parse_aob(app.aobText, pat, mask)) {
+        app.scanStatus = "invalid AOB pattern (use hex bytes + ?? wildcards)";
+        return;
+    }
+    if (app.scanThread.joinable()) app.scanThread.join();
+    app.scanCancel = false;
+    app.scanProgress = 0.0f;
+    app.scanning = true;
+    bool wo = app.writableOnly;
+    app.scanThread = std::thread([&app, pat, mask, wo] {
+        size_t n = app.target.aob_scan(pat, mask, wo, &app.scanCancel, &app.scanProgress);
+        app.scanStatus = std::to_string(n) + (app.scanCancel.load() ? " matches (cancelled)" : " matches");
+        app.hasScanned = true;
+        app.scanning = false;
+    });
+}
+
+static void start_string_scan(App& app) {
+    if (app.scanning.load()) return;
+    if (!app.strText[0]) { app.scanStatus = "enter text to search"; return; }
+    if (app.scanThread.joinable()) app.scanThread.join();
+    app.scanCancel = false;
+    app.scanProgress = 0.0f;
+    app.scanning = true;
+    std::string needle = app.strText;
+    bool utf16 = app.strUtf16;
+    bool wo = app.writableOnly;
+    app.scanThread = std::thread([&app, needle, utf16, wo] {
+        size_t n = app.target.string_scan(needle, utf16, wo, &app.scanCancel, &app.scanProgress);
+        app.scanStatus = std::to_string(n) + (app.scanCancel.load() ? " matches (cancelled)" : " matches");
+        app.hasScanned = true;
+        app.scanning = false;
+    });
+}
+
 static void add_cheat_from(App& app, uintptr_t addr, int type) {
     Cheat c;
     c.addr = addr;
@@ -351,7 +448,16 @@ static void add_cheat_from(App& app, uintptr_t addr, int type) {
 }
 
 // ── UI theme ─────────────────────────────────────────────────────────────────
-static void StyleHexforge() {
+static ImVec4 accent_color(int a) {
+    switch (a) {
+        case 1: return ImVec4(0.208f, 0.878f, 0.816f, 1.0f);  // teal
+        case 2: return ImVec4(1.0f, 0.70f, 0.26f, 1.0f);      // amber
+        case 3: return ImVec4(0.95f, 0.30f, 0.42f, 1.0f);     // crimson
+        default: return ImVec4(0.486f, 0.361f, 1.0f, 1.0f);   // violet
+    }
+}
+
+static void StyleHexforge(int accentIdx = 0) {
     ImGui::StyleColorsDark();
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding = 8;
@@ -363,7 +469,7 @@ static void StyleHexforge() {
     s.FramePadding = ImVec2(8, 5);
     s.ItemSpacing = ImVec2(8, 7);
     ImVec4* c = s.Colors;
-    const ImVec4 accent(0.486f, 0.361f, 1.0f, 1.0f);   // #7C5CFF
+    const ImVec4 accent = accent_color(accentIdx);
     const ImVec4 accent2(0.208f, 0.878f, 0.816f, 1.0f); // #35E0D0
     c[ImGuiCol_WindowBg] = ImVec4(0.039f, 0.047f, 0.071f, 1.0f);
     c[ImGuiCol_ChildBg] = ImVec4(0.055f, 0.067f, 0.098f, 1.0f);
@@ -454,39 +560,70 @@ static void drawScanner(App& app) {
     ImGui::TextDisabled("1) type + number -> First Scan.  2) change it in-game -> pick increased/decreased -> Next Scan.  3) repeat. Right-click a result for options.");
     ImGui::Separator();
 
-    ImGui::SetNextItemWidth(120);
-    ImGui::Combo("type", &app.scanType, types, 6);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputText("value", app.scanValue, sizeof(app.scanValue));
-
-    if (!attached || scanning) ImGui::BeginDisabled();
-    if (ImGui::Button("First Scan", ImVec2(110, 0))) {
-        start_first_scan(app, false);
-        app.addlog("first scan started (" + std::string(types[app.scanType]) + " = " + app.scanValue + ")");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("First Scan (unknown)", ImVec2(160, 0))) {
-        start_first_scan(app, true);
-        app.addlog("unknown-value first scan started");
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(120);
-    ImGui::Combo("##cmp", &app.scanCompare, cmps, 5);
-    ImGui::SameLine();
-    if (ImGui::Button("Next Scan", ImVec2(110, 0))) {
-        start_next_scan(app);
-        app.addlog("next scan (" + std::string(cmps[app.scanCompare]) + ")");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Reset")) {
-        app.target.clear_scan();
-        app.scanStatus = "cleared";
-        app.hasScanned = false;
-    }
-    if (!attached || scanning) ImGui::EndDisabled();
+    const char* kinds[] = { "Value", "AOB pattern", "Text string" };
+    ImGui::SetNextItemWidth(130);
+    ImGui::Combo("search", &app.scanKind, kinds, 3);
     ImGui::SameLine();
     ImGui::Checkbox("writable only", &app.writableOnly);
+
+    if (app.scanKind == 0) {
+        // ── classic value scan ──
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("type", &app.scanType, types, 6);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(160);
+        ImGui::InputText("value", app.scanValue, sizeof(app.scanValue));
+
+        if (!attached || scanning) ImGui::BeginDisabled();
+        if (ImGui::Button("First Scan", ImVec2(110, 0))) {
+            start_first_scan(app, false);
+            app.addlog("first scan started (" + std::string(types[app.scanType]) + " = " + app.scanValue + ")");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("First Scan (unknown)", ImVec2(160, 0))) {
+            start_first_scan(app, true);
+            app.addlog("unknown-value first scan started");
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("##cmp", &app.scanCompare, cmps, 5);
+        ImGui::SameLine();
+        if (ImGui::Button("Next Scan", ImVec2(110, 0))) {
+            start_next_scan(app);
+            app.addlog("next scan (" + std::string(cmps[app.scanCompare]) + ")");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            app.target.clear_scan();
+            app.scanStatus = "cleared";
+            app.hasScanned = false;
+        }
+        if (!attached || scanning) ImGui::EndDisabled();
+    } else if (app.scanKind == 1) {
+        // ── AOB / byte-pattern scan ──
+        ImGui::SetNextItemWidth(-120);
+        ImGui::InputTextWithHint("pattern", "48 8B ?? C3 90  (hex bytes, ?? = wildcard)", app.aobText, sizeof(app.aobText));
+        if (!attached || scanning) ImGui::BeginDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Scan AOB", ImVec2(100, 0))) start_aob_scan(app);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##aob")) { app.target.clear_scan(); app.scanStatus = "cleared"; }
+        if (!attached || scanning) ImGui::EndDisabled();
+        ImGui::TextDisabled("Finds a byte signature. Survives game restarts/updates better than a raw address; great for Lua AOB cheats.");
+    } else {
+        // ── text / string scan ──
+        ImGui::SetNextItemWidth(-200);
+        ImGui::InputTextWithHint("text", "text to find in memory", app.strText, sizeof(app.strText));
+        ImGui::SameLine();
+        ImGui::Checkbox("UTF-16", &app.strUtf16);
+        if (!attached || scanning) ImGui::BeginDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Scan text", ImVec2(100, 0))) start_string_scan(app);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##str")) { app.target.clear_scan(); app.scanStatus = "cleared"; }
+        if (!attached || scanning) ImGui::EndDisabled();
+        ImGui::TextDisabled("ASCII by default; tick UTF-16 for wide strings (most Windows apps/games).");
+    }
 
     ImGui::Separator();
 
@@ -537,6 +674,13 @@ static void drawScanner(App& app) {
             }
             if (ImGui::BeginPopupContextItem()) {
                 if (ImGui::MenuItem("Add to Trainer")) add_cheat_from(app, res[i], app.scanType);
+                if (ImGui::MenuItem("Add to Watch")) {
+                    Cheat w;
+                    w.addr = res[i];
+                    w.type = app.scanType;
+                    snprintf(w.label, sizeof(w.label), "watch %zu", app.watches.size() + 1);
+                    app.watches.push_back(w);
+                }
                 if (ImGui::MenuItem("Edit value (write live)")) {
                     app.editAddr = res[i];
                     snprintf(app.editBuf, sizeof(app.editBuf), "%s",
@@ -638,6 +782,25 @@ static void drawHex(App& app) {
     ImGui::Separator();
     if (app.hexValid) {
         drawDataInspector(base, app.hexBuf);
+        // Byte editor for the selected cell.
+        if (app.hexSel >= 0 && app.hexSel < 256) {
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputText("##edb", app.hexEditByte, sizeof(app.hexEditByte),
+                             ImGuiInputTextFlags_CharsHexadecimal);
+            ImGui::SameLine();
+            if (ImGui::Button("Write byte")) {
+                uint8_t v = (uint8_t)strtoul(app.hexEditByte, nullptr, 16);
+                if (app.target.write(base + app.hexSel, &v, 1)) {
+                    app.hexBuf[app.hexSel] = v;
+                    app.toast("byte written");
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("editing +%X (%016llX). Click a byte below to select.",
+                                app.hexSel, (unsigned long long)(base + app.hexSel));
+        } else {
+            ImGui::TextDisabled("Click any byte below to edit it.");
+        }
         ImGui::Separator();
     }
 
@@ -651,9 +814,19 @@ static void drawHex(App& app) {
             ImGui::TextColored(dim, "%016llX ", (unsigned long long)(base + off));
             for (int i = 0; i < 16; ++i) {
                 ImGui::SameLine(0, 6);
-                uint8_t byte = app.hexBuf[off + i];
-                bool changed = app.hexHasPrev && byte != app.hexPrev[off + i];
-                ImGui::TextColored(changed ? red : white, "%02X", byte);
+                int idx = off + i;
+                uint8_t byte = app.hexBuf[idx];
+                bool changed = app.hexHasPrev && byte != app.hexPrev[idx];
+                char bb[4];
+                snprintf(bb, sizeof(bb), "%02X", byte);
+                ImGui::PushID(idx);
+                ImGui::PushStyleColor(ImGuiCol_Text, changed ? red : white);
+                if (ImGui::Selectable(bb, app.hexSel == idx, 0, ImVec2(19, 0))) {
+                    app.hexSel = idx;
+                    snprintf(app.hexEditByte, sizeof(app.hexEditByte), "%02X", byte);
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopID();
             }
             ImGui::SameLine(0, 12);
             char ascii[17];
@@ -665,7 +838,7 @@ static void drawHex(App& app) {
             ImGui::TextColored(dim, "%s", ascii);
         }
     } else {
-        ImGui::TextDisabled("Enter an address and press Read (attach a target first). Tip: click a Scanner result to fill this.");
+        ImGui::TextDisabled("Enter an address and press Read (attach a target first). Tip: click a Scanner result to fill this. Find bytes/strings on the Scanner tab (AOB / Text).");
     }
     ImGui::EndChild();
 }
@@ -748,6 +921,18 @@ static void drawModules(App& app) {
 
 static void drawPointerScan(App& app) {
     bool attached = app.target.attached();
+    ImGui::TextWrapped("Finds a stable module+offset path to an address so a cheat survives restarts. "
+                       "Fill the target (click a Scanner result -> Pointer scan), pick a preset, Scan.");
+    // Presets
+    ImGui::TextUnformatted("Preset:");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Quick (d2, 0x400)")) { app.ptrLevels = 2; app.ptrMaxOff = 0x400; }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Normal (d4, 0x1000)")) { app.ptrLevels = 4; app.ptrMaxOff = 0x1000; }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Deep (d5, 0x2000)")) { app.ptrLevels = 5; app.ptrMaxOff = 0x2000; }
+    ImGui::Separator();
+
     ImGui::SetNextItemWidth(180);
     ImGui::InputTextWithHint("##paddr", "target address (hex)", app.ptrAddr, sizeof(app.ptrAddr));
     ImGui::SameLine();
@@ -769,17 +954,20 @@ static void drawPointerScan(App& app) {
     }
     if (!attached) ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", app.ptrStatus.c_str());
+    ImGui::TextDisabled("%s  (Revalidate after a restart to confirm a path still resolves)", app.ptrStatus.c_str());
 
     ImGui::Separator();
     ImGui::BeginChild("chains", ImVec2(0, 0), true);
-    if (ImGui::BeginTable("chain", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+    if (ImGui::BeginTable("chain", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupColumn("Module");
-        ImGui::TableSetupColumn("offset");
+        ImGui::TableSetupColumn("offset", ImGuiTableColumnFlags_WidthFixed, 90);
         ImGui::TableSetupColumn("chain -> target");
+        ImGui::TableSetupColumn("resolves", ImGuiTableColumnFlags_WidthFixed, 150);
         ImGui::TableHeadersRow();
-        for (const auto& c : app.ptrChains) {
+        for (size_t i = 0; i < app.ptrChains.size(); ++i) {
+            const auto& c = app.ptrChains[i];
             ImGui::TableNextRow();
+            ImGui::PushID((int)(7000 + i));
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(w2u(c.module).c_str());
             ImGui::TableSetColumnIndex(1);
@@ -792,12 +980,40 @@ static void drawPointerScan(App& app) {
                 s += b;
             }
             ImGui::TextUnformatted(s.c_str());
+            ImGui::TableSetColumnIndex(3);
+            uintptr_t resolved = attached ? app.target.resolve_chain(c) : 0;
+            if (resolved) {
+                if (ImGui::SmallButton("Hex")) snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)resolved);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.24f, 0.86f, 0.52f, 1), "%llX", (unsigned long long)resolved);
+            } else {
+                ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "broken");
+            }
+            ImGui::PopID();
         }
         ImGui::EndTable();
     }
     if (app.ptrChains.empty())
         ImGui::TextDisabled("No chains yet. Attach, scan for a value, click a result to fill the address, then Scan.");
     ImGui::EndChild();
+}
+
+// Write a patch, saving original bytes for one-click revert.
+static void apply_patch(App& app, uintptr_t addr, const std::vector<uint8_t>& bytes, const std::string& desc) {
+    std::vector<uint8_t> orig(bytes.size());
+    if (!app.target.read(addr, orig.data(), orig.size())) { app.addlog("patch: read failed"); return; }
+    if (!app.target.write(addr, bytes.data(), bytes.size())) { app.addlog("patch: write failed"); return; }
+    app.patches.push_back({addr, orig, desc});
+    app.toast(desc);
+    app.addlog("patched " + desc);
+}
+
+static void revert_patch(App& app, size_t idx) {
+    if (idx >= app.patches.size()) return;
+    auto& p = app.patches[idx];
+    app.target.write(p.addr, p.orig.data(), p.orig.size());
+    app.addlog("reverted " + p.desc);
+    app.patches.erase(app.patches.begin() + idx);
 }
 
 static void drawDisasm(App& app) {
@@ -809,6 +1025,7 @@ static void drawDisasm(App& app) {
     if (ImGui::Button("Disassemble")) {
         uintptr_t a = (uintptr_t)strtoull(app.disasmAddr, nullptr, 16);
         app.disasmLines.clear();
+        app.disasmMeta.clear();
         if (a) {
             uint8_t code[256];
             if (app.target.read(a, code, sizeof(code))) {
@@ -832,9 +1049,10 @@ static void drawDisasm(App& app) {
                         bytes += hb;
                     }
                     char line[400];
-                    snprintf(line, sizeof(line), "%016llX  %-30s %s", (unsigned long long)(a + off),
+                    snprintf(line, sizeof(line), "%016llX  %-24s %s", (unsigned long long)(a + off),
                              bytes.c_str(), text);
                     app.disasmLines.push_back(line);
+                    app.disasmMeta.push_back({a + off, ins.length});
                     off += ins.length;
                 }
                 if (app.disasmLines.empty()) app.addlog("disasm: could not decode @ " + std::string(app.disasmAddr));
@@ -844,11 +1062,246 @@ static void drawDisasm(App& app) {
         }
     }
     if (!attached) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("right-click an instruction to NOP / patch");
+
+    // Active patches with revert.
+    if (!app.patches.empty()) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.33f, 1), "Patches (%zu)", app.patches.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Revert all")) {
+            for (size_t i = app.patches.size(); i-- > 0;) revert_patch(app, i);
+        }
+        int revert = -1;
+        for (size_t i = 0; i < app.patches.size(); ++i) {
+            ImGui::PushID((int)(1000 + i));
+            if (ImGui::SmallButton("revert")) revert = (int)i;
+            ImGui::SameLine();
+            ImGui::Text("%016llX  %s", (unsigned long long)app.patches[i].addr, app.patches[i].desc.c_str());
+            ImGui::PopID();
+        }
+        if (revert >= 0) revert_patch(app, (size_t)revert);
+    }
 
     ImGui::Separator();
     ImGui::BeginChild("dis", ImVec2(0, 0), true);
-    for (const auto& l : app.disasmLines) ImGui::TextUnformatted(l.c_str());
+    for (size_t i = 0; i < app.disasmLines.size(); ++i) {
+        ImGui::PushID((int)i);
+        ImGui::Selectable(app.disasmLines[i].c_str());
+        if (attached && ImGui::BeginPopupContextItem("insn")) {
+            uintptr_t ia = app.disasmMeta[i].first;
+            int ilen = app.disasmMeta[i].second;
+            if (ImGui::MenuItem("NOP this instruction")) {
+                std::vector<uint8_t> nops(ilen, 0x90);
+                char d[64];
+                snprintf(d, sizeof(d), "NOP %016llX (%d)", (unsigned long long)ia, ilen);
+                apply_patch(app, ia, nops, d);
+            }
+            if (ImGui::MenuItem("Copy address")) {
+                char ab[20];
+                snprintf(ab, sizeof(ab), "%llX", (unsigned long long)ia);
+                ImGui::SetClipboardText(ab);
+            }
+            if (ImGui::MenuItem("Watch who writes here")) {
+                snprintf(app.watchAddr, sizeof(app.watchAddr), "%llX", (unsigned long long)ia);
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
     if (app.disasmLines.empty()) ImGui::TextDisabled("Enter an address and Disassemble (attached target).");
+    ImGui::EndChild();
+}
+
+static std::string addr_to_module(App& app, uintptr_t a) {
+    for (const auto& m : app.modules)
+        if (a >= m.base && a < m.base + m.size) {
+            char b[200];
+            snprintf(b, sizeof(b), "%s+%llX", w2u(m.name).c_str(), (unsigned long long)(a - m.base));
+            return b;
+        }
+    return "";
+}
+
+// ── Watch list (quick, live, not exported) ───────────────────────────────────
+static void drawWatch(App& app) {
+    bool attached = app.target.attached();
+    const char* types[] = { "int8", "int16", "int32", "int64", "float", "double" };
+    static char waddr[32] = "";
+    static int wtype = 2;
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##wa", "address (hex)", waddr, sizeof(waddr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110);
+    ImGui::Combo("##wt", &wtype, types, 6);
+    ImGui::SameLine();
+    if (ImGui::Button("Add watch") && waddr[0]) {
+        Cheat w;
+        w.addr = (uintptr_t)strtoull(waddr, nullptr, 16);
+        w.type = wtype;
+        snprintf(w.label, sizeof(w.label), "watch %zu", app.watches.size() + 1);
+        app.watches.push_back(w);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Pin addresses to see them live. Freeze locks them. Right-click a Scanner result -> Add to Watch.");
+    ImGui::Separator();
+
+    if (app.watches.empty()) { ImGui::TextDisabled("No watches yet."); return; }
+    int removeIdx = -1;
+    if (ImGui::BeginTable("watch", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 150);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 150);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn("Now", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("Freeze/Value", ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < app.watches.size(); ++i) {
+            Cheat& w = app.watches[i];
+            ImGui::TableNextRow();
+            ImGui::PushID((int)(5000 + i));
+            ImGui::TableSetColumnIndex(0);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##n", w.label, sizeof(w.label));
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%016llX", (unsigned long long)w.addr);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::Combo("##t", &w.type, types, 6);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(attached ? fmtValueAt(app.target, w.addr, scanTypeOf(w.type)).c_str() : "-");
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Checkbox("##f", &w.freeze);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##v", w.value, sizeof(w.value));
+            ImGui::TableSetColumnIndex(5);
+            if (ImGui::SmallButton("Set"))
+                writeTyped(app, w.addr, scanTypeOf(w.type), strtod(w.value, nullptr));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Hex")) snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)w.addr);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeIdx = (int)i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (removeIdx >= 0) app.watches.erase(app.watches.begin() + removeIdx);
+}
+
+// ── Find what writes/accesses an address (debugger + hardware breakpoint) ─────
+static void drawFindWrites(App& app) {
+    bool attached = app.target.attached();
+    ImGui::TextColored(ImVec4(0.49f, 0.36f, 1.0f, 1.0f), "Find what writes/reads an address");
+    ImGui::TextWrapped("Arms a CPU hardware breakpoint and records the exact instructions that touch this address. "
+                       "This is how you discover shared code (e.g. the ammo-decrement that hits every weapon). "
+                       "The tool becomes the game's debugger while running; click Stop to detach cleanly.");
+    ImGui::Separator();
+    if (!attached) { ImGui::TextColored(ImVec4(1, 0.71f, 0.33f, 1), "Attach to a target first."); return; }
+
+    const char* sizes[] = { "1 byte", "2 bytes", "4 bytes", "8 bytes" };
+    int sizeIdx = app.watchSize == 1 ? 0 : app.watchSize == 2 ? 1 : app.watchSize == 8 ? 3 : 2;
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##fwa", "address (hex)", app.watchAddr, sizeof(app.watchAddr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    if (ImGui::Combo("##fws", &sizeIdx, sizes, 4))
+        app.watchSize = sizeIdx == 0 ? 1 : sizeIdx == 1 ? 2 : sizeIdx == 3 ? 8 : 4;
+    ImGui::SameLine();
+    ImGui::Checkbox("writes only", &app.watchWrite);
+
+    bool running = app.watch.running();
+    if (!running) {
+        if (ImGui::Button("Start watching", ImVec2(140, 0)) && app.watchAddr[0]) {
+            uintptr_t a = (uintptr_t)strtoull(app.watchAddr, nullptr, 16);
+            std::string err;
+            if (!app.watch.start(app.target.pid(), a, app.watchSize, app.watchWrite, err))
+                app.addlog("watch start failed: " + err);
+            else app.addlog("watch started @ " + std::string(app.watchAddr));
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.25f, 0.25f, 1));
+        if (ImGui::Button("Stop", ImVec2(140, 0))) app.watch.stop();
+        ImGui::PopStyleColor();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", app.watch.status().c_str());
+
+    ImGui::Separator();
+    auto hits = app.watch.hits();
+    ImGui::Text("Instructions seen: %zu", hits.size());
+    ImGui::BeginChild("hits", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("fw", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Instruction (RIP)", ImGuiTableColumnFlags_WidthFixed, 160);
+        ImGui::TableSetupColumn("Module+Offset");
+        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < hits.size(); ++i) {
+            ImGui::TableNextRow();
+            ImGui::PushID((int)(6000 + i));
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%016llX", (unsigned long long)hits[i].rip);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(addr_to_module(app, hits[i].rip).c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%llu", (unsigned long long)hits[i].count);
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("Disasm")) {
+                // RIP is just after the write; back up a little so the writer shows.
+                uintptr_t a = hits[i].rip > 24 ? hits[i].rip - 24 : hits[i].rip;
+                snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)a);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+}
+
+// ── Struct dissector ──────────────────────────────────────────────────────────
+static void drawStruct(App& app) {
+    bool attached = app.target.attached();
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##sa", "base address (hex)", app.structAddr, sizeof(app.structAddr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    ImGui::SliderInt("rows", &app.structRows, 4, 64);
+    ImGui::TextDisabled("Shows memory at base as a live struct: offset, raw qword, and the common interpretations. Great for mapping objects.");
+    ImGui::Separator();
+    if (!attached) { ImGui::TextColored(ImVec4(1, 0.71f, 0.33f, 1), "Attach to a target first."); return; }
+
+    uintptr_t base = (uintptr_t)strtoull(app.structAddr, nullptr, 16);
+    if (!base) { ImGui::TextDisabled("Enter a base address (e.g. click a result -> Pointer scan / Hex)."); return; }
+
+    ImGui::BeginChild("struct", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("st", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("int32", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn("int64", ImGuiTableColumnFlags_WidthFixed, 150);
+        ImGui::TableSetupColumn("float", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn("double / pointer");
+        ImGui::TableHeadersRow();
+        for (int r = 0; r < app.structRows; ++r) {
+            int off = r * 8;
+            uint8_t b[8] = {};
+            bool ok = app.target.read(base + off, b, 8);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("+%X", off);
+            if (!ok) { ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("??"); continue; }
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%d", *(int32_t*)b);
+            ImGui::TableSetColumnIndex(2); ImGui::Text("%lld", (long long)*(int64_t*)b);
+            ImGui::TableSetColumnIndex(3); ImGui::Text("%.4f", *(float*)b);
+            ImGui::TableSetColumnIndex(4);
+            uintptr_t ptr = *(uintptr_t*)b;
+            std::string mod = addr_to_module(app, ptr);
+            if (!mod.empty()) ImGui::Text("%.6f   -> %s", *(double*)b, mod.c_str());
+            else ImGui::Text("%.6f   (%016llX)", *(double*)b, (unsigned long long)ptr);
+        }
+        ImGui::EndTable();
+    }
     ImGui::EndChild();
 }
 
@@ -887,7 +1340,53 @@ static void drawRuntime(App& app) {
 
     ImGui::Separator();
     ImGui::TextUnformatted("Lua (sandboxed, via evalLua):");
-    ImGui::InputTextMultiline("##lua", app.luaCode, sizeof(app.luaCode), ImVec2(-1, 120));
+
+    // Snippet library demonstrating the API.
+    struct Snip { const char* name; const char* code; };
+    static const Snip snips[] = {
+        { "Resolve export",
+          "local p = umf.resolve(\"kernel32.dll\", \"GetProcAddress\")\n"
+          "umf.log(\"GetProcAddress @ \" .. tostring(p))\n" },
+        { "Module base + read",
+          "local base = umf.module_base(\"re3.exe\")\n"
+          "umf.log(string.format(\"base = %X\", base))\n"
+          "umf.log(\"int32 @ base+0x100 = \" .. tostring(umf.read_i32(base + 0x100)))\n" },
+        { "Write a value",
+          "local addr = 0x1D9C90A12AC   -- paste an address from the scanner\n"
+          "umf.write_i32(addr, 999)\n"
+          "umf.log(\"wrote 999, now = \" .. tostring(umf.read_i32(addr)))\n" },
+        { "AOB scan -> patch (all-weapon ammo)",
+          "-- Find the shared 'ammo--' instruction and NOP it so NO weapon loses ammo.\n"
+          "local hit = umf.aob(\"29 41 ?? 48 8B\")   -- example: sub [rcx+off], eax\n"
+          "if hit then umf.nop(hit, 3); umf.log(\"patched ammo decrement @ \"..string.format(\"%X\",hit))\n"
+          "else umf.log(\"pattern not found\") end\n" },
+        { "Hook: force return (god mode)",
+          "-- Make a function always return 0 (e.g. TakeDamage / IsDead).\n"
+          "local fn = umf.aob(\"48 89 5C 24 08 57 48 83 EC 20\")\n"
+          "if fn then\n"
+          "  umf.hook(fn, function(a,b,c,d)\n"
+          "    return 0   -- skip original, return 0\n"
+          "  end)\n"
+          "  umf.log(\"hooked\")\n"
+          "end\n" },
+        { "Hook: wrap + call original",
+          "local fn = umf.resolve(\"user32.dll\", \"MessageBoxA\")\n"
+          "umf.hook(fn, function(hwnd, text, cap, typ)\n"
+          "  umf.log(\"MessageBoxA intercepted\")\n"
+          "  return umf.call_original(hwnd, text, cap, typ)\n"
+          "end)\n" },
+    };
+    ImGui::SetNextItemWidth(300);
+    if (ImGui::BeginCombo("snippet", snips[app.luaSnippet].name)) {
+        for (int i = 0; i < (int)(sizeof(snips) / sizeof(snips[0])); ++i)
+            if (ImGui::Selectable(snips[i].name, app.luaSnippet == i)) app.luaSnippet = i;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load snippet"))
+        snprintf(app.luaCode, sizeof(app.luaCode), "%s", snips[app.luaSnippet].code);
+
+    ImGui::InputTextMultiline("##lua", app.luaCode, sizeof(app.luaCode), ImVec2(-1, 200));
     if (!connected) ImGui::BeginDisabled();
     if (ImGui::Button("Run Lua")) {
         std::string params = "{\"code\":\"" + json_escape(app.luaCode) + "\"}";
@@ -896,9 +1395,13 @@ static void drawRuntime(App& app) {
         app.rtOutput = res.empty() ? ("error: " + err) : res;
     }
     if (!connected) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Clear output")) app.rtOutput.clear();
+    ImGui::SameLine();
+    ImGui::TextDisabled("API: umf.read_i32/f32/f64, write_*, read/write_bytes, aob, nop, module_base, resolve, hook, call_original, log");
 
     ImGui::TextUnformatted("Response:");
-    ImGui::BeginChild("rtresp", ImVec2(0, 130), true);
+    ImGui::BeginChild("rtresp", ImVec2(0, 110), true);
     ImGui::TextWrapped("%s", app.rtOutput.empty() ? "(no response yet)" : app.rtOutput.c_str());
     ImGui::EndChild();
 
@@ -920,6 +1423,25 @@ static std::wstring widen(const std::string& s) {
     std::wstring w(n, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
     return w;
+}
+
+// Native open/save file dialog. Returns a UTF-8 path, or "" if cancelled.
+static std::string pick_file(bool save, const wchar_t* filter, const wchar_t* defExt) {
+    wchar_t buf[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = defExt;
+    ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST);
+    BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+    if (!ok) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n - 1 : 0, 0);
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, buf, -1, s.data(), n, nullptr, nullptr);
+    return s;
 }
 
 // Build a shareable trainer document from the current table.
@@ -1195,6 +1717,11 @@ static void drawTrainer(App& app) {
     ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::InputTextWithHint("##dc", "Discord URL", app.trainerDiscord, sizeof(app.trainerDiscord));
     ImGui::SameLine(); ImGui::SetNextItemWidth(230); ImGui::InputTextWithHint("##img", "cover image path (.png/.jpg)", app.trainerImage, sizeof(app.trainerImage));
     ImGui::SameLine();
+    if (ImGui::Button("Browse")) {
+        std::string p = pick_file(false, L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All\0*.*\0", L"png");
+        if (!p.empty()) snprintf(app.trainerImage, sizeof(app.trainerImage), "%s", p.c_str());
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Clear img")) app.trainerImage[0] = 0;
     ImGui::SameLine();
     if (app.trainerImage[0]) {
@@ -1277,6 +1804,10 @@ static void drawTrainer(App& app) {
                 ImGui::TextDisabled("Tip shown in the trainer (e.g. game caps this at 60):");
                 ImGui::SetNextItemWidth(320);
                 ImGui::InputText("##note", c.note, sizeof(c.note));
+                const char* fz[] = { "Locked (exact)", "No less than (floor)", "No more than (cap)" };
+                ImGui::SetNextItemWidth(320);
+                ImGui::Combo("freeze mode", &c.freezeMode, fz, 3);
+                ImGui::TextDisabled("Floor keeps HP/ammo from dropping below Value but lets it rise.");
                 ImGui::EndPopup();
             }
             ImGui::SameLine();
@@ -1303,14 +1834,17 @@ static void drawHelp(App& app) {
     ImGui::BeginChild("helpc", ImVec2(0, 0), true);
     item("TARGETS (left)", "Pick a process (search by name or PID). Attach = read/write its memory. Inject runtime = load the engine for hooks/overlay (not needed for scanning). Green [runtime] = already injected.");
     item("Wizard", "Start here. A guided 4-step flow: choose Health/Money/Ammo/Speed/Other, enter the in-game number, change it and say up/down/same, then click 'Make cheat' to drop it straight into the Trainer. No scanner knowledge needed.");
-    item("Scanner", "Find a value. Set type (int32 first; HP is often float; money often double), type the number, First Scan. Change it in-game, pick increased/decreased, Next Scan. Repeat to a few results. Right-click a result -> Add to Trainer / Hex / Disasm. 'First Scan (unknown)' when you don't know the number.");
+    item("Scanner", "Find a value. Set type (int32 first; HP is often float; money often double), type the number, First Scan. Change it in-game, pick increased/decreased, Next Scan. Repeat to a few results. Right-click a result -> Add to Trainer / Watch / Hex / Disasm. 'First Scan (unknown)' when you don't know the number. Switch 'search' to AOB pattern (byte signature, survives updates) or Text string.");
     item("Trainer", "Your saved cheats. Each has a value, a Mode (Toggle = hotkey flips Freeze on/off for god mode; Set once = hotkey writes the value one time), a Freeze lock, and a Hotkey (F1-F12) that works while in-game. Save/Load writes a .hexforge file next to the exe. 'Export Trainer (.exe)' bundles the table into a single shareable program that auto-finds the game by name.");
-    item("Pointer Scan", "Find a permanent path (module+offsets) to an address so it survives game restarts. Fill the target address (click a Scanner result first), set depth, Scan.");
-    item("Disasm", "Show the CPU instructions at an address (Zydis). Useful to understand code around a value.");
-    item("Hex", "Raw bytes at an address (hex + text). Tick 'Live' to re-read every frame - bytes that just changed flash red, and the Data Inspector shows the bytes as int/float/double at once. This is how you tell a steady value (health, ammo) from one that updates constantly (position, timers).");
+    item("Pointer Scan", "Find a permanent path (module+offsets) to an address so it survives game restarts. Fill the target address (click a Scanner result first), pick a preset, Scan. The 'resolves' column revalidates each path live.");
+    item("Find Writes", "Becomes the game's debugger and arms a CPU hardware breakpoint to catch the exact instructions that write/read an address. This is how you find shared code (e.g. the ammo-decrement that hits every weapon) to NOP in Disasm. Click Stop to detach cleanly.");
+    item("Disasm", "Show the CPU instructions at an address (Zydis). Right-click an instruction to NOP/patch it (with one-click Revert) - the basis of all-weapon/god-mode cheats.");
+    item("Hex", "Raw bytes at an address (hex + text). Tick 'Live' to re-read every frame - bytes that just changed flash red, and the Data Inspector shows the bytes as int/float/double at once. Click a byte to edit it. This is how you tell a steady value (health, ammo) from one that updates constantly (position, timers).");
+    item("Struct", "Shows memory at a base address as a live struct (offset, int, float, pointer). Great for mapping an object you found via pointer scan.");
+    item("Watch", "Pin addresses to see their values live and freeze them, without building a trainer. Right-click a Scanner result -> Add to Watch.");
     item("Memory Map", "All memory regions of the target with protection (RW-, R-X...). Click a region to jump to it in Hex.");
     item("Modules", "Loaded DLLs with base address + size. Click to send the base to Hex.");
-    item("Runtime", "Only after Inject runtime: talk to the engine over its pipe - mitigations, hook/mod lists, and sandboxed Lua, with a live log.");
+    item("Runtime", "Only after Inject runtime: talk to the engine over its pipe - mitigations, hook/mod lists, and sandboxed Lua, with a live log. Lua now has read/write/aob/nop/hook so you can script reload-safe and all-weapon cheats (see snippets).");
     item("Log", "What the tool did. A full copy is also written to hexforge.log next to the exe. Crashes write hexforge-crash.dmp.");
     ImGui::Separator();
     ImGui::TextWrapped("Quick infinite-ammo recipe: Attach -> Scanner int32 = ammo -> shoot -> Next Scan decreased -> repeat to 1-3 results -> right-click -> Add to Trainer -> set Value + tick Freeze (or assign F1).");
@@ -1365,11 +1899,98 @@ static void drawLog(App& app) {
     ImGui::EndChild();
 }
 
+static void save_settings(App& app) {
+    std::wstring path = exe_dir() + L"hexforge.ini";
+    FILE* f = nullptr;
+    _wfopen_s(&f, path.c_str(), L"w");
+    if (!f) return;
+    fprintf(f, "accent=%d\n", app.accent);
+    fprintf(f, "writableOnly=%d\n", app.writableOnly ? 1 : 0);
+    fclose(f);
+}
+
+static void load_settings(App& app) {
+    std::string t = read_whole_file(exe_dir() + L"hexforge.ini");
+    if (t.empty()) return;
+    size_t pos = 0;
+    while (pos < t.size()) {
+        size_t nl = t.find('\n', pos);
+        std::string line = t.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = (nl == std::string::npos) ? t.size() : nl + 1;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        if (k == "accent") app.accent = atoi(v.c_str());
+        else if (k == "writableOnly") app.writableOnly = atoi(v.c_str()) != 0;
+    }
+}
+
+static void drawSettings(App& app) {
+    ImGui::TextColored(ImVec4(0.49f, 0.36f, 1.0f, 1.0f), "Settings");
+    ImGui::TextDisabled("Saved to hexforge.ini next to the exe.");
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("Accent color");
+    const char* accents[] = { "Violet", "Teal", "Amber", "Crimson" };
+    for (int i = 0; i < 4; ++i) {
+        ImVec4 col = accent_color(i);
+        ImGui::PushStyleColor(ImGuiCol_Button, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+        if (ImGui::Button(accents[i], ImVec2(90, 0))) {
+            app.accent = i;
+            StyleHexforge(app.accent);
+            save_settings(app);
+            app.toast(std::string("accent: ") + accents[i]);
+        }
+        ImGui::PopStyleColor(3);
+        if (i < 3) ImGui::SameLine();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Checkbox("Default scans to writable memory only", &app.writableOnly)) save_settings(app);
+    ImGui::TextDisabled("Writable-only is faster and finds game values; untick to also scan read-only/code.");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Rights");
+    ImGui::TextColored(hx::is_elevated() ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(1, 0.71f, 0.33f, 1),
+                       hx::is_elevated() ? "Running elevated (full access)" : "Not elevated - some games need admin");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("About");
+    ImGui::TextDisabled("Hexforge - native memory + injection toolkit. Scanner, trainer export, pointer/AOB,");
+    ImGui::TextDisabled("disasm+patch, find-what-writes, struct dissector, and an injectable Lua engine.");
+}
+
+static void drawToasts(App& app) {
+    double now = (double)GetTickCount64() / 1000.0;
+    app.toasts.erase(std::remove_if(app.toasts.begin(), app.toasts.end(),
+                                    [&](const App::Toast& t) { return t.expire < now; }),
+                     app.toasts.end());
+    if (app.toasts.empty()) return;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    float w = 320, h = 34;
+    float x = vp->WorkPos.x + vp->WorkSize.x - w - 20;
+    float y = vp->WorkPos.y + vp->WorkSize.y - 20;
+    ImVec4 ac = accent_color(app.accent);
+    ImU32 border = IM_COL32((int)(ac.x * 255), (int)(ac.y * 255), (int)(ac.z * 255), 220);
+    for (size_t i = app.toasts.size(); i-- > 0;) {
+        y -= (h + 8);
+        ImVec2 p0(x, y), p1(x + w, y + h);
+        dl->AddRectFilled(p0, p1, IM_COL32(16, 19, 28, 245), 6.0f);
+        dl->AddRect(p0, p1, border, 6.0f, 0, 1.5f);
+        dl->AddText(ImVec2(x + 12, y + 9), IM_COL32(230, 232, 240, 255), app.toasts[i].text.c_str());
+    }
+}
+
 static void drawUI(App& app) {
     if (app.rt.connected()) app.rt.pump();
     if (app.target.attached()) {
         for (auto& c : app.cheats)
-            if (c.mode == 0 && c.freeze) writeTyped(app, c.addr, scanTypeOf(c.type), strtod(c.value, nullptr));
+            if (c.mode == 0 && c.freeze) apply_freeze(app, c);
+        for (auto& w : app.watches)
+            if (w.freeze) apply_freeze(app, w);
     }
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1411,18 +2032,23 @@ static void drawUI(App& app) {
         ImGuiTabItemFlags trFlags = app.gotoTrainer ? ImGuiTabItemFlags_SetSelected : 0;
         if (ImGui::BeginTabItem("Trainer", nullptr, trFlags)) { drawTrainer(app); ImGui::EndTabItem(); }
         app.gotoTrainer = false;
+        if (ImGui::BeginTabItem("Watch")) { drawWatch(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Pointer Scan")) { drawPointerScan(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Find Writes")) { drawFindWrites(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Disasm")) { drawDisasm(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Hex")) { drawHex(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Struct")) { drawStruct(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Memory Map")) { drawMemoryMap(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Modules")) { drawModules(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Runtime")) { drawRuntime(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Settings")) { drawSettings(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Help")) { drawHelp(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Log")) { drawLog(app); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
     ImGui::EndChild();
 
+    drawToasts(app);
     ImGui::End();
 }
 
@@ -1462,6 +2088,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     App app;
     g_app = &app;
+    load_settings(app);
+    StyleHexforge(app.accent);
     hx::enable_debug_privilege();
     app.refreshProcs();
     app.addlog("Hexforge ready. Rights: " + std::string(hx::is_elevated() ? "elevated" : "standard"));

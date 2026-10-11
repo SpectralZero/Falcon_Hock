@@ -441,6 +441,100 @@ size_t Target::next_scan(ScanCompare c, double value,
     return results_.size();
 }
 
+bool parse_aob(const std::string& text, std::vector<uint8_t>& pattern, std::vector<bool>& mask) {
+    pattern.clear();
+    mask.clear();
+    size_t i = 0;
+    auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    while (i < text.size()) {
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+        if (i >= text.size()) break;
+        if (text[i] == '?') {
+            pattern.push_back(0);
+            mask.push_back(false);
+            ++i;
+            if (i < text.size() && text[i] == '?') ++i;   // allow "??"
+        } else {
+            int hi = hexval(text[i]);
+            if (hi < 0) return false;
+            int lo = (i + 1 < text.size()) ? hexval(text[i + 1]) : -1;
+            if (lo < 0) { pattern.push_back((uint8_t)hi); i += 1; }
+            else { pattern.push_back((uint8_t)(hi * 16 + lo)); i += 2; }
+            mask.push_back(true);
+        }
+    }
+    return !pattern.empty();
+}
+
+size_t Target::aob_scan(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
+                        bool writable_only, std::atomic<bool>* cancel, std::atomic<float>* progress) {
+    clear_scan();
+    if (!h_ || pattern.empty()) return 0;
+    size_t plen = pattern.size();
+
+    auto regs = regions();
+    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
+    std::vector<uintptr_t> rr;
+    std::vector<double> ll;
+    std::vector<uint8_t> buf;
+    const size_t CHUNK = 1u << 20;
+    for (const auto& r : regs) {
+        if (cancel && cancel->load()) break;
+        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
+        if (!usable) continue;
+        // Overlap chunks by plen-1 so matches on a boundary are not missed.
+        for (size_t off = 0; off < r.size; off += (CHUNK - (plen - 1))) {
+            if (cancel && cancel->load()) break;
+            size_t len = r.size - off;
+            if (len > CHUNK) len = CHUNK;
+            if (len < plen) break;
+            buf.resize(len);
+            SIZE_T got = 0;
+            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= plen) {
+                size_t n = (size_t)got;
+                for (size_t o = 0; o + plen <= n; ++o) {
+                    bool hit = true;
+                    for (size_t k = 0; k < plen; ++k) {
+                        if (mask[k] && buf[o + k] != pattern[k]) { hit = false; break; }
+                    }
+                    if (hit) {
+                        rr.push_back(r.base + off + o);
+                        ll.push_back(0.0);
+                        if (rr.size() >= kScanCap) { done = total; goto done_label; }
+                    }
+                }
+            }
+            done += len;
+            if (progress) progress->store((float)((double)done / (double)total));
+            if (len < CHUNK) break;
+        }
+    }
+done_label:
+    if (progress) progress->store(1.0f);
+    std::lock_guard<std::mutex> lk(mtx_);
+    results_.swap(rr);
+    last_.swap(ll);
+    return results_.size();
+}
+
+size_t Target::string_scan(const std::string& needle, bool utf16, bool writable_only,
+                           std::atomic<bool>* cancel, std::atomic<float>* progress) {
+    std::vector<uint8_t> pat;
+    std::vector<bool> mask;
+    if (utf16) {
+        for (char c : needle) { pat.push_back((uint8_t)c); mask.push_back(true);
+                                pat.push_back(0); mask.push_back(true); }
+    } else {
+        for (char c : needle) { pat.push_back((uint8_t)c); mask.push_back(true); }
+    }
+    return aob_scan(pat, mask, writable_only, cancel, progress);
+}
+
 std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
                                            int64_t max_offset, int max_results) {
     std::vector<PtrChain> chains;
@@ -537,6 +631,185 @@ std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
         if (frontier.empty()) break;
     }
     return chains;
+}
+
+uintptr_t Target::resolve_chain(const PtrChain& c) const {
+    if (!h_ || c.offsets.empty()) return 0;
+    uintptr_t base = 0;
+    for (const auto& m : modules())
+        if (m.name == c.module) { base = m.base; break; }
+    if (!base) return 0;
+    uintptr_t p = 0;
+    if (!read(base + c.module_offset, &p, 8)) return 0;
+    p += (uintptr_t)c.offsets[0];
+    for (size_t i = 1; i < c.offsets.size(); ++i) {
+        if (!read(p, &p, 8)) return 0;
+        p += (uintptr_t)c.offsets[i];
+    }
+    return p;
+}
+
+// ── DebugWatch: find what writes/accesses an address ────────────────────────────────────────────────
+
+bool DebugWatch::start(uint32_t pid, uintptr_t addr, int size, bool on_write, std::string& err) {
+    if (running_.load()) { err = "a watch is already running"; return false; }
+    if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+    // Hardware breakpoints require the address aligned to the length; fall back
+    // to a 1-byte watch if it is not aligned.
+    if (addr % (uintptr_t)size != 0) size = 1;
+    pid_ = pid;
+    addr_ = addr;
+    size_ = size;
+    on_write_ = on_write;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        hits_.clear();
+        status_ = "starting...";
+    }
+    stop_ = false;
+    running_ = true;
+    th_ = std::thread([this] { loop(); });
+    return true;
+}
+
+void DebugWatch::stop() {
+    stop_ = true;
+    if (th_.joinable()) th_.join();
+    running_ = false;
+}
+
+std::vector<WriteHit> DebugWatch::hits() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return hits_;
+}
+
+std::string DebugWatch::status() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return status_;
+}
+
+void DebugWatch::arm_thread(HANDLE th) {
+    if (!th) return;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(th, &ctx)) return;
+    DWORD64 len;   // encode length: 1->00, 2->01, 8->10, 4->11
+    switch (size_) {
+        case 1: len = 0b00; break;
+        case 2: len = 0b01; break;
+        case 8: len = 0b10; break;
+        default: len = 0b11; break;
+    }
+    DWORD64 rw = on_write_ ? 0b01 : 0b11;   // write-only, or read/write
+    ctx.Dr0 = addr_;
+    DWORD64 dr7 = ctx.Dr7;
+    dr7 |= 1;                       // L0 (local enable for DR0)
+    dr7 &= ~(0xFull << 16);         // clear RW0 + LEN0
+    dr7 |= (rw << 16) | (len << 18);
+    ctx.Dr7 = dr7;
+    ctx.Dr6 = 0;
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    SetThreadContext(th, &ctx);
+}
+
+void DebugWatch::disarm_all() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid_) continue;
+            HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+            if (!th) continue;
+            CONTEXT ctx{};
+            ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(th, &ctx)) {
+                ctx.Dr0 = 0;
+                ctx.Dr7 &= ~(DWORD64)(1 | (0xFull << 16));   // disable DR0
+                ctx.Dr6 = 0;
+                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                SetThreadContext(th, &ctx);
+            }
+            CloseHandle(th);
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+}
+
+void DebugWatch::loop() {
+    if (!DebugActiveProcess(pid_)) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        status_ = "DebugActiveProcess failed (error " + std::to_string(GetLastError()) +
+                  "); run elevated and detach other debuggers";
+        running_ = false;
+        return;
+    }
+    DebugSetProcessKillOnExit(FALSE);   // never take the game down with us
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        status_ = "watching... change the value in-game to catch the writer";
+    }
+
+    bool alive = true;
+    while (alive && !stop_.load()) {
+        DEBUG_EVENT ev;
+        if (!WaitForDebugEvent(&ev, 200)) continue;   // timeout: re-check stop_
+
+        DWORD cont = DBG_CONTINUE;
+        switch (ev.dwDebugEventCode) {
+            case CREATE_PROCESS_DEBUG_EVENT:
+                arm_thread(ev.u.CreateProcessInfo.hThread);
+                if (ev.u.CreateProcessInfo.hFile) CloseHandle(ev.u.CreateProcessInfo.hFile);
+                break;
+            case CREATE_THREAD_DEBUG_EVENT:
+                arm_thread(ev.u.CreateThread.hThread);
+                break;
+            case EXCEPTION_DEBUG_EVENT: {
+                DWORD code = ev.u.Exception.ExceptionRecord.ExceptionCode;
+                if (code == EXCEPTION_SINGLE_STEP) {
+                    HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, ev.dwThreadId);
+                    if (th) {
+                        CONTEXT ctx{};
+                        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL;
+                        if (GetThreadContext(th, &ctx) && (ctx.Dr6 & 0xF)) {
+                            uintptr_t rip = (uintptr_t)ctx.Rip;
+                            std::lock_guard<std::mutex> lk(mtx_);
+                            bool found = false;
+                            for (auto& hhit : hits_)
+                                if (hhit.rip == rip) { hhit.count++; found = true; break; }
+                            if (!found && hits_.size() < 256)
+                                hits_.push_back({rip, ev.dwThreadId, 1});
+                        }
+                        ctx.Dr6 = 0;
+                        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                        SetThreadContext(th, &ctx);
+                        CloseHandle(th);
+                    }
+                    cont = DBG_CONTINUE;
+                } else if (code == EXCEPTION_BREAKPOINT) {
+                    cont = DBG_CONTINUE;             // initial loader breakpoint
+                } else {
+                    cont = DBG_EXCEPTION_NOT_HANDLED; // let the app handle its own
+                }
+                break;
+            }
+            case EXIT_PROCESS_DEBUG_EVENT:
+                alive = false;
+                break;
+            default:
+                break;
+        }
+        ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+    }
+
+    disarm_all();
+    DebugActiveProcessStop(pid_);
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        status_ = alive ? "stopped" : "target exited";
+    }
+    running_ = false;
 }
 
 } // namespace hx

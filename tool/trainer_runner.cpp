@@ -223,6 +223,26 @@ static void fire_set_once(Runner& r, int idx) {
     hx::write_typed(r.target, c.addr, hx::scan_type_of(c.type), strtod(c.value, nullptr));
 }
 
+// Freeze honoring the freeze mode: locked / floor / cap.
+static void apply_freeze(Runner& r, hx::Cheat& c) {
+    hx::ScanType ty = hx::scan_type_of(c.type);
+    double target = strtod(c.value, nullptr);
+    if (c.freezeMode == 0) { hx::write_typed(r.target, c.addr, ty, target); return; }
+    uint8_t b[8] = {};
+    if (!r.target.read(c.addr, b, hx::type_size(ty))) return;
+    double cur = 0;
+    switch (ty) {
+        case hx::ScanType::I8: cur = *(int8_t*)b; break;
+        case hx::ScanType::I16: cur = *(int16_t*)b; break;
+        case hx::ScanType::I32: cur = *(int32_t*)b; break;
+        case hx::ScanType::I64: cur = (double)*(int64_t*)b; break;
+        case hx::ScanType::F32: cur = *(float*)b; break;
+        case hx::ScanType::F64: cur = *(double*)b; break;
+    }
+    if (c.freezeMode == 1 && cur < target) hx::write_typed(r.target, c.addr, ty, target);
+    else if (c.freezeMode == 2 && cur > target) hx::write_typed(r.target, c.addr, ty, target);
+}
+
 static void on_hotkey(WPARAM id) {
     int idx = (int)id - HK_BASE;
     if (!g_run || idx < 0 || idx >= (int)g_run->doc.cheats.size()) return;
@@ -358,7 +378,7 @@ static void draw(Runner& r) {
     if (r.attached) {
         for (auto& c : r.doc.cheats)
             if (c.mode == 0 && c.freeze)
-                hx::write_typed(r.target, c.addr, hx::scan_type_of(c.type), strtod(c.value, nullptr));
+                apply_freeze(r, c);
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();

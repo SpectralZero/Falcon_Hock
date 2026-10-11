@@ -145,37 +145,53 @@ Before clicking **Export Trainer (.exe)**:
 
 Ordered by impact. This is the "don't make me list features" backlog, drawn from what Cheat Engine / x64dbg / ReClass / FLiNG / WeMod / BepInEx provide.
 
+> **Update (latest pass): P0 1–3, P1 5–9, P2 10–11, P3 14–18 are now DONE.** See the checkmarks and §9 changelog. Remaining: P0 #4 (visual return-hook UI; available via Lua today), P2 #12–13 (visual hook manager, mod packaging), P3 #19, and the whole P4 platform track.
+
 ### P0 — the big missing capabilities
-1. **"Find what writes/accesses this address"** (debug-register or injected hook). This is how you discover the shared code (e.g. the ammo decrement) and get **all-weapon** cheats. Unlocks #2.
-2. **Patch / NOP / assemble** in Disasm with **one-click revert** (code caves, "replace instruction", auto-restore on detach). The other half of all-weapon/god-mode cheats.
-3. **AOB (array-of-bytes) pattern scan** with wildcards, in the external tool. Makes cheats **survive game updates** and makes exported trainers reusable across versions. Essential for shareable trainers.
-4. **Return-value override hooks** exposed in the UI ("when `IsDead()` is called, return false") so god-mode needs no code typing.
+1. ✅ **"Find what writes/accesses this address"** — **Find Writes** tab (debugger + hardware breakpoint). Catches the exact instructions; "Disasm" jumps to them.
+2. ✅ **Patch / NOP / assemble** — Disasm right-click **NOP this instruction** with a **Patches** list + one-click **Revert / Revert all**.
+3. ✅ **AOB pattern scan** with wildcards — Scanner "search = AOB pattern"; also `umf.aob` in Lua.
+4. ⬜ **Return-value override hooks** exposed as a no-code UI. (Available **today via Lua**: `umf.hook(fn, function() return 0 end)` — see LUA_DEMO.md §8.)
 
 ### P1 — robustness & discovery
-5. **Pointer-scan presets + auto-revalidation** (restart game, confirm the path still resolves; export path as `.json`). Turn one-off addresses into permanent, shareable cheats.
-6. **Struct dissector / ReClass view** (define a struct at an address, name fields, see them live). Core RE workflow.
-7. **Hex editing** (click-to-edit bytes, find bytes/string, copy as C array/hex/base64, split compare view).
-8. **String search & replace** (great for apps and localization).
-9. **Watch list** (pin addresses with labels, live, independent of scan results).
+5. ✅ **Pointer-scan presets + revalidation** — Quick/Normal/Deep presets; a live "resolves" column via `resolve_chain`.
+6. ✅ **Struct dissector** — **Struct** tab shows memory at a base as a live typed table.
+7. ✅ **Hex editing** — click a byte to edit + write; Data Inspector; live changed-byte highlight. (Find bytes/string lives on the Scanner AOB/Text modes.)
+8. ✅ **String search** — Scanner "search = Text string" (ASCII + UTF-16). (Replace-all still TODO.)
+9. ✅ **Watch list** — **Watch** tab (pin addresses, live, freeze), plus right-click → Add to Watch.
 
 ### P2 — scripting & mods (lean on the engine you already have)
-10. **Lua editor upgrades:** syntax highlighting, line numbers, autocomplete for `umf.*`, snippet library ("find health", "hook function", "AOB → address"), run/stop, error highlighting, REPL.
-11. **High-value Lua API surface:** `aob_scan`, `watch`, `freeze`/`unfreeze`, `hook_ret`, `list_hooks`, `list_modules`, `find_string`, `hotkey`, `timer`, `notify`. (Several already exist in the engine; expose/document them.)
-12. **Visual hook manager** (pick a function, toggle a hook, see args/return) — no coding.
-13. **Mod packaging** (BepInEx-style): bundle Lua/native mods + manifest; one-click load via the runtime.
+10. ✅ (mostly) **Lua editor upgrades** — snippet library + bigger editor + clear/output. (Syntax highlight/autocomplete/REPL still TODO.)
+11. ✅ **High-value Lua API** — added `read_*/write_*`, `read_bytes/write_bytes`, `aob`, `nop`, `module_base` to the engine sandbox (alongside `resolve/hook/call_original/log`). See LUA_DEMO.md.
+12. ⬜ **Visual hook manager** (pick a function, toggle a hook, see args/return) — no coding.
+13. ⬜ **Mod packaging** (BepInEx-style): bundle Lua/native mods + manifest; one-click load via the runtime.
 
 ### P3 — trainer/UX polish
-14. **Trainer categories/groups**, reorder rows, duplicate, enable-all/disable-all.
-15. **Cheat "freeze types":** locked, increment, decrement, locked-range.
-16. **Settings tab:** theme, global show/hide hotkey, auto-attach to last process, log level, language (EN/AR).
-17. **Toolbar + status bar**, resizable/detachable panels, toast notifications.
-18. **Real brand icon assets** (drop official GitHub/Discord PNGs into `tool/assets/` and wire them; today they're clean drawn glyphs). Same for a game-image **picker dialog** (currently a path field).
-19. **Export options:** trainer window size/theme, author/credits, version, optional "safe mode" indicator.
+14. ✅ **Trainer** reorder/duplicate/enable-all — All-OFF + per-row controls; Watch list added. (Named groups still TODO.)
+15. ✅ **Cheat freeze types** — Locked / No-less-than (floor) / No-more-than (cap), in tool + exported trainer.
+16. ✅ **Settings tab** — accent theme (persisted to `hexforge.ini`), default writable-only, rights/about.
+17. ✅ **Toasts** — toast notifications for patches/writes. (Detachable panels still TODO.)
+18. ✅ **Game-image picker dialog** (+ trainer save/load dialogs). Brand icons are still clean drawn glyphs (drop-in official PNGs = TODO).
+19. ⬜ **Export options:** trainer window size/theme, author/credits, version, "safe mode" indicator.
 
-### P4 — the community/platform vision
-20. **Trainer registry/manifest format** (sign + version `.hexforge` / exported trainers; metadata: game, version, author, hashes).
-21. **In-tool browser** to publish/search/install community trainers & mods ("search RE4 → install").
-22. **Account/author identity**, update checks, and a submission pipeline — so mid+ users publish under your tool's brand and normal users browse/install. The current `.hexforge` + single-file export is the foundation for this.
+### P4 — the community/platform vision (not started — needs backend/online infra)
+20. ⬜ **Trainer registry/manifest format** (sign + version; metadata: game, version, author, hashes).
+21. ⬜ **In-tool browser** to publish/search/install community trainers & mods.
+22. ⬜ **Account/author identity**, update checks, submission pipeline.
+
+---
+
+## 9. Changelog — latest pass
+- **Find Writes** tab: `DebugWatch` (DebugActiveProcess + DR0/DR7 hardware breakpoint on all threads; kill-on-exit disabled; clean disarm/detach on Stop).
+- **Disasm**: NOP/patch with original-bytes capture and Revert/Revert-all.
+- **Scanner**: AOB pattern (wildcards) and Text (ASCII/UTF-16) search modes; per-row **Set** live-write.
+- **Pointer Scan**: presets + live resolve/revalidate column.
+- **Struct** dissector tab; **Watch** tab; **Settings** tab (persisted); toast notifications; native file dialogs.
+- **Freeze types** (locked/floor/cap) in tool + exported trainer.
+- **Engine Lua API** expanded: memory read/write, `read_bytes`/`write_bytes`, `aob`, `nop`, `module_base`; Runtime tab snippet library. Engine tests still **399/399**.
+- See **LUA_DEMO.md** for a full hands-on scripting walkthrough (all-weapon ammo, god-mode hook, reload-safe addresses).
+
+
 
 ---
 

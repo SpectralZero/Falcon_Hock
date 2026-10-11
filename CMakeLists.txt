@@ -182,7 +182,7 @@ target_link_libraries(hexforge_tool PRIVATE
     imgui::imgui
     Zydis::Zydis
     d3d11 dxgi d3dcompiler
-    user32 gdi32 advapi32 dbghelp
+    user32 gdi32 advapi32 dbghelp comdlg32
 )
 if(MSVC)
     target_link_options(hexforge_tool PRIVATE

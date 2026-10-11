@@ -12,6 +12,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <thread>
 
 namespace hx {
 
@@ -85,6 +86,17 @@ public:
     size_t next_scan(ScanCompare c, double value,
                      std::atomic<bool>* cancel = nullptr,
                      std::atomic<float>* progress = nullptr);
+
+    // AOB / pattern scan: find a byte pattern with wildcards. `pattern` holds the
+    // bytes; `mask[i] == false` marks a wildcard (pattern[i] ignored).
+    size_t aob_scan(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
+                    bool writable_only, std::atomic<bool>* cancel = nullptr,
+                    std::atomic<float>* progress = nullptr);
+    // Text search: find occurrences of an ASCII or UTF-16LE string.
+    size_t string_scan(const std::string& needle, bool utf16, bool writable_only,
+                       std::atomic<bool>* cancel = nullptr,
+                       std::atomic<float>* progress = nullptr);
+
     void clear_scan();
     ScanType scan_type() const { return stype_; }
 
@@ -98,6 +110,9 @@ public:
     std::vector<PtrChain> pointer_scan(uintptr_t target, int max_level,
                                        int64_t max_offset, int max_results);
 
+    // Resolve a static pointer chain to its final address (0 if it breaks).
+    uintptr_t resolve_chain(const PtrChain& c) const;
+
 private:
     HANDLE h_ = nullptr;
     uint32_t pid_ = 0;
@@ -105,6 +120,47 @@ private:
     mutable std::mutex mtx_;
     std::vector<uintptr_t> results_;
     std::vector<double> last_;
+};
+
+// Parse an AOB string like "48 8B ?? C3 ?? 90" into bytes + a wildcard mask.
+bool parse_aob(const std::string& text, std::vector<uint8_t>& pattern, std::vector<bool>& mask);
+
+// One instruction caught writing/reading a watched address.
+struct WriteHit {
+    uintptr_t rip = 0;    // instruction pointer at the trap (just after the access)
+    uint32_t tid = 0;     // thread that did it
+    uint64_t count = 0;   // how many times seen
+};
+
+// "Find what writes/accesses this address." Becomes a debugger of the target
+// (DebugActiveProcess), arms a hardware data breakpoint (DR0/DR7) on every
+// thread, and records the instruction pointers that trip it. Runs on its own
+// thread; stop() disarms the breakpoints and detaches cleanly (kill-on-exit is
+// disabled so the target keeps running).
+class DebugWatch {
+public:
+    ~DebugWatch() { stop(); }
+    bool start(uint32_t pid, uintptr_t addr, int size, bool on_write, std::string& err);
+    void stop();
+    bool running() const { return running_.load(); }
+    std::vector<WriteHit> hits() const;
+    std::string status() const;
+
+private:
+    void loop();
+    void arm_thread(HANDLE th);
+    void disarm_all();
+
+    std::thread th_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> stop_{false};
+    uint32_t pid_ = 0;
+    uintptr_t addr_ = 0;
+    int size_ = 4;
+    bool on_write_ = true;
+    mutable std::mutex mtx_;
+    std::vector<WriteHit> hits_;
+    std::string status_;
 };
 
 } // namespace hx

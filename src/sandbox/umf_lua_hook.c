@@ -223,6 +223,111 @@ static int l_umf_resolve(lua_State* L) {
     return 1;
 }
 
+/* ── Memory access (in-process; the runtime is injected into the target) ──
+ * Addresses may be passed as integers or as the lightuserdata returned by
+ * umf.resolve / umf.aob. Reads/writes are fault-guarded so a bad address
+ * returns nil/false instead of crashing the game. */
+
+#include <windows.h>
+
+static uintptr_t lua_addr(lua_State* L, int idx) {
+    if (lua_islightuserdata(L, idx)) return (uintptr_t)lua_touserdata(L, idx);
+    return (uintptr_t)(uint64_t)luaL_checkinteger(L, idx);
+}
+
+static int safe_copy(void* dst, const void* src, size_t n) {
+    __try { memcpy(dst, src, n); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int prot_write(uintptr_t a, const void* src, size_t n) {
+    DWORD old = 0;
+    BOOL changed = VirtualProtect((void*)a, n, PAGE_EXECUTE_READWRITE, &old);
+    int ok = safe_copy((void*)a, src, n);
+    if (changed) { DWORD tmp; VirtualProtect((void*)a, n, old, &tmp); }
+    return ok;
+}
+
+#define UMF_LUA_READ(NAME, CTYPE, PUSH)                              \
+    static int NAME(lua_State* L) {                                  \
+        uintptr_t a = lua_addr(L, 1);                                \
+        CTYPE v;                                                     \
+        if (!safe_copy(&v, (void*)a, sizeof(v))) { lua_pushnil(L); return 1; } \
+        PUSH(L, v);                                                  \
+        return 1;                                                    \
+    }
+UMF_LUA_READ(l_read_i8,  int8_t,   lua_pushinteger)
+UMF_LUA_READ(l_read_i16, int16_t,  lua_pushinteger)
+UMF_LUA_READ(l_read_i32, int32_t,  lua_pushinteger)
+UMF_LUA_READ(l_read_u32, uint32_t, lua_pushinteger)
+UMF_LUA_READ(l_read_i64, int64_t,  lua_pushinteger)
+UMF_LUA_READ(l_read_f32, float,    lua_pushnumber)
+UMF_LUA_READ(l_read_f64, double,   lua_pushnumber)
+
+#define UMF_LUA_WRITE(NAME, CTYPE, GET)                              \
+    static int NAME(lua_State* L) {                                  \
+        uintptr_t a = lua_addr(L, 1);                                \
+        CTYPE v = (CTYPE)GET(L, 2);                                  \
+        lua_pushboolean(L, prot_write(a, &v, sizeof(v)));            \
+        return 1;                                                    \
+    }
+UMF_LUA_WRITE(l_write_i8,  int8_t,   luaL_checkinteger)
+UMF_LUA_WRITE(l_write_i16, int16_t,  luaL_checkinteger)
+UMF_LUA_WRITE(l_write_i32, int32_t,  luaL_checkinteger)
+UMF_LUA_WRITE(l_write_i64, int64_t,  luaL_checkinteger)
+UMF_LUA_WRITE(l_write_f32, float,    luaL_checknumber)
+UMF_LUA_WRITE(l_write_f64, double,   luaL_checknumber)
+
+static int l_read_bytes(lua_State* L) {
+    uintptr_t a = lua_addr(L, 1);
+    size_t n = (size_t)luaL_checkinteger(L, 2);
+    if (n == 0 || n > (1u << 20)) { lua_pushnil(L); return 1; }
+    void* tmp = malloc(n);
+    if (!tmp) { lua_pushnil(L); return 1; }
+    if (!safe_copy(tmp, (void*)a, n)) { free(tmp); lua_pushnil(L); return 1; }
+    lua_pushlstring(L, (const char*)tmp, n);
+    free(tmp);
+    return 1;
+}
+
+static int l_write_bytes(lua_State* L) {
+    uintptr_t a = lua_addr(L, 1);
+    size_t n = 0;
+    const char* s = luaL_checklstring(L, 2, &n);
+    lua_pushboolean(L, n ? prot_write(a, s, n) : 0);
+    return 1;
+}
+
+static int l_nop(lua_State* L) {
+    uintptr_t a = lua_addr(L, 1);
+    size_t n = (size_t)luaL_checkinteger(L, 2);
+    if (n == 0 || n > 256) { lua_pushboolean(L, 0); return 1; }
+    unsigned char* b = (unsigned char*)malloc(n);
+    if (!b) { lua_pushboolean(L, 0); return 1; }
+    memset(b, 0x90, n);
+    int ok = prot_write(a, b, n);
+    free(b);
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+static int l_module_base(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    HMODULE h = GetModuleHandleA(name);
+    if (!h) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)h);
+    return 1;
+}
+
+static int l_aob(lua_State* L) {
+    const char* pattern = luaL_checkstring(L, 1);
+    const char* module = luaL_optstring(L, 2, NULL);
+    void* found = umf_aob_scan(pattern, module);
+    if (!found) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)found);
+    return 1;
+}
+
 void umf_lua_setup_api(lua_State* L, UmfMod* mod) {
     lua_newtable(L);                       /* umf = {} */
 
@@ -234,6 +339,26 @@ void umf_lua_setup_api(lua_State* L, UmfMod* mod) {
     lua_pushcfunction(L, l_umf_call_original); lua_setfield(L, -2, "call_original");
     lua_pushcfunction(L, l_umf_log);           lua_setfield(L, -2, "log");
     lua_pushcfunction(L, l_umf_resolve);       lua_setfield(L, -2, "resolve");
+
+    /* memory access */
+    lua_pushcfunction(L, l_read_i8);    lua_setfield(L, -2, "read_i8");
+    lua_pushcfunction(L, l_read_i16);   lua_setfield(L, -2, "read_i16");
+    lua_pushcfunction(L, l_read_i32);   lua_setfield(L, -2, "read_i32");
+    lua_pushcfunction(L, l_read_u32);   lua_setfield(L, -2, "read_u32");
+    lua_pushcfunction(L, l_read_i64);   lua_setfield(L, -2, "read_i64");
+    lua_pushcfunction(L, l_read_f32);   lua_setfield(L, -2, "read_float");
+    lua_pushcfunction(L, l_read_f64);   lua_setfield(L, -2, "read_double");
+    lua_pushcfunction(L, l_read_bytes); lua_setfield(L, -2, "read_bytes");
+    lua_pushcfunction(L, l_write_i8);   lua_setfield(L, -2, "write_i8");
+    lua_pushcfunction(L, l_write_i16);  lua_setfield(L, -2, "write_i16");
+    lua_pushcfunction(L, l_write_i32);  lua_setfield(L, -2, "write_i32");
+    lua_pushcfunction(L, l_write_i64);  lua_setfield(L, -2, "write_i64");
+    lua_pushcfunction(L, l_write_f32);  lua_setfield(L, -2, "write_float");
+    lua_pushcfunction(L, l_write_f64);  lua_setfield(L, -2, "write_double");
+    lua_pushcfunction(L, l_write_bytes);lua_setfield(L, -2, "write_bytes");
+    lua_pushcfunction(L, l_nop);        lua_setfield(L, -2, "nop");
+    lua_pushcfunction(L, l_module_base);lua_setfield(L, -2, "module_base");
+    lua_pushcfunction(L, l_aob);        lua_setfield(L, -2, "aob");
 
     lua_setglobal(L, "umf");
 

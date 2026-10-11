@@ -28,10 +28,10 @@ std::string serialize_trainer(const TrainerDoc& doc) {
     if (!doc.imageName.empty()) o += "#IMAGE=" + sanitize(doc.imageName) + "\n";
     for (const auto& c : doc.cheats) {
         char line[512];
-        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d|%s\n",
+        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d|%s|%d\n",
                  sanitize(c.label).c_str(), (unsigned long long)c.addr, c.type,
                  sanitize(c.value).c_str(), c.freeze ? 1 : 0, c.hotkey, c.mode,
-                 sanitize(c.note).c_str());
+                 sanitize(c.note).c_str(), c.freezeMode);
         o += line;
     }
     return o;
@@ -64,11 +64,11 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
             continue;
         }
 
-        // cheat line: label|addr|type|value|freeze|hotkey|mode|note
-        std::string f[8];
+        // cheat line: label|addr|type|value|freeze|hotkey|mode|note|freezeMode
+        std::string f[9];
         int nf = 0;
         size_t start = 0;
-        for (size_t i = 0; i <= line.size() && nf < 8; ++i) {
+        for (size_t i = 0; i <= line.size() && nf < 9; ++i) {
             if (i == line.size() || line[i] == '|') {
                 f[nf++] = line.substr(start, i - start);
                 start = i + 1;
@@ -85,6 +85,7 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
             c.hotkey = atoi(f[5].c_str());
             c.mode = (nf >= 7) ? atoi(f[6].c_str()) : 0;
             if (nf >= 8) snprintf(c.note, sizeof(c.note), "%s", f[7].c_str());
+            c.freezeMode = (nf >= 9) ? atoi(f[8].c_str()) : 0;
             out.cheats.push_back(c);
         }
     }
