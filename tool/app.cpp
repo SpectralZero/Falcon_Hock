@@ -273,6 +273,8 @@ struct App {
     char trainerTitle[64] = "My Trainer";
     char trainerGithub[160] = "";
     char trainerDiscord[160] = "";
+    char trainerAuthor[64] = "";
+    char trainerVersion[24] = "1.0";
     char trainerImage[300] = "";   // path to a cover image (png/jpg) to embed
     std::string exportStatus;
     bool hotkeysDirty = false;
@@ -1339,6 +1341,36 @@ static void drawRuntime(App& app) {
     }
 
     ImGui::Separator();
+    // No-code "force return" hook: god mode / all-weapon by making a function
+    // return a constant. Builds a tiny Lua call under the hood.
+    {
+        static char hkAddr[32] = "";
+        static int hkRet = 0;
+        ImGui::TextUnformatted("Quick hook (force a function to return a value):");
+        ImGui::SetNextItemWidth(170);
+        ImGui::InputTextWithHint("##hka", "function address (hex)", hkAddr, sizeof(hkAddr));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        ImGui::InputInt("returns", &hkRet);
+        ImGui::SameLine();
+        if (!connected) ImGui::BeginDisabled();
+        if (ImGui::Button("Install hook") && hkAddr[0]) {
+            char code[256];
+            snprintf(code, sizeof(code),
+                     "umf.hook(0x%s, function() return %d end); umf.log('hook installed')",
+                     hkAddr, hkRet);
+            std::string params = "{\"code\":\"" + json_escape(code) + "\"}";
+            std::string err;
+            std::string res = app.rt.call("evalLua", params, err);
+            app.rtOutput = res.empty() ? ("error: " + err) : res;
+            app.toast("hook installed");
+        }
+        if (!connected) ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("e.g. make TakeDamage/IsDead return 0 = god mode. Use 'Hooks' above to list.");
+    }
+
+    ImGui::Separator();
     ImGui::TextUnformatted("Lua (sandboxed, via evalLua):");
 
     // Snippet library demonstrating the API.
@@ -1451,6 +1483,8 @@ static hx::TrainerDoc trainer_doc(App& app) {
     d.target = !app.attachedName.empty() ? app.attachedName : app.selectedName;
     d.github = app.trainerGithub;
     d.discord = app.trainerDiscord;
+    d.author = app.trainerAuthor;
+    d.version = app.trainerVersion;
     d.cheats = app.cheats;
     return d;
 }
@@ -1489,6 +1523,8 @@ static void load_trainer(App& app) {
     if (!d.title.empty()) snprintf(app.trainerTitle, sizeof(app.trainerTitle), "%s", d.title.c_str());
     if (!d.github.empty()) snprintf(app.trainerGithub, sizeof(app.trainerGithub), "%s", d.github.c_str());
     if (!d.discord.empty()) snprintf(app.trainerDiscord, sizeof(app.trainerDiscord), "%s", d.discord.c_str());
+    if (!d.author.empty()) snprintf(app.trainerAuthor, sizeof(app.trainerAuthor), "%s", d.author.c_str());
+    if (!d.version.empty()) snprintf(app.trainerVersion, sizeof(app.trainerVersion), "%s", d.version.c_str());
     if (!d.target.empty() && app.attachedName.empty()) app.attachedName = d.target;
     app.hotkeysDirty = true;
     app.addlog(std::string("loaded ") + app.trainerFile + " (" + std::to_string(app.cheats.size()) + " cheats)");
@@ -1715,6 +1751,8 @@ static void drawTrainer(App& app) {
     // Branding that gets baked into the exported trainer.
     ImGui::SetNextItemWidth(150); ImGui::InputTextWithHint("##gh", "GitHub URL", app.trainerGithub, sizeof(app.trainerGithub));
     ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::InputTextWithHint("##dc", "Discord URL", app.trainerDiscord, sizeof(app.trainerDiscord));
+    ImGui::SameLine(); ImGui::SetNextItemWidth(120); ImGui::InputTextWithHint("##au", "author", app.trainerAuthor, sizeof(app.trainerAuthor));
+    ImGui::SameLine(); ImGui::SetNextItemWidth(70); ImGui::InputTextWithHint("##ver", "ver", app.trainerVersion, sizeof(app.trainerVersion));
     ImGui::SameLine(); ImGui::SetNextItemWidth(230); ImGui::InputTextWithHint("##img", "cover image path (.png/.jpg)", app.trainerImage, sizeof(app.trainerImage));
     ImGui::SameLine();
     if (ImGui::Button("Browse")) {

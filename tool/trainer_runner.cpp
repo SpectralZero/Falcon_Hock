@@ -560,7 +560,13 @@ static void draw(Runner& r) {
         // Info text at bottom of right panel
         ImGui::Separator();
         ImGui::TextDisabled("Edit the Value box to change the amount live (e.g. type a new ammo count) - no need to remake a cheat.");
-        ImGui::TextDisabled("Toggle: freeze locks the value every frame (infinite). Set once: writes the value now. Hotkeys work in-game. Made with Hexforge.");
+        ImGui::TextDisabled("Toggle: freeze locks the value every frame (infinite). Set once: writes the value now. Hotkeys work in-game.");
+        {
+            std::string credit = "Made with Hexforge";
+            if (!r.doc.author.empty()) credit += "  -  by " + r.doc.author;
+            if (!r.doc.version.empty()) credit += "  v" + r.doc.version;
+            ImGui::TextDisabled("%s", credit.c_str());
+        }
     }
     ImGui::EndChild();
 

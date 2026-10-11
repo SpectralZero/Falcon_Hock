@@ -78,3 +78,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
+/* Exported bootstrap for injection. The external tool runs this in a remote
+ * thread (CreateRemoteThread) right after LoadLibrary, so an injected runtime
+ * initialises itself — logging + IPC pipe server — with no dedicated host.
+ * Signature matches LPTHREAD_START_ROUTINE so it can be a thread entry point. */
+UMF_API DWORD WINAPI umf_runtime_start(LPVOID param) {
+    (void)param;
+    umf_log_init(NULL);   /* default log dir (next to this module) */
+    umf_init();           /* pre-flight + start the IPC pipe server */
+    return 0;
+}

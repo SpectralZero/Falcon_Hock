@@ -1108,6 +1108,14 @@ UMF_API void umf_lua_setup_api(struct lua_State* L, UmfMod* mod);
 /* Compile and run a Lua chunk. Returns true on success. */
 UMF_API bool umf_lua_run_string(struct lua_State* L, const char* chunk);
 
+/* Persistent sandbox for interactive eval (Runtime tab / IPC evalLua). Lazily
+ * created and kept alive so hooks installed from a script keep working after
+ * the call returns. Lua execution is serialized with the exec lock below so an
+ * eval and a hook callback (on another thread) never touch the state at once. */
+UMF_API struct lua_State* umf_lua_eval_state(void);
+UMF_API void umf_lua_exec_lock(void);
+UMF_API void umf_lua_exec_unlock(void);
+
 /* ════════════════════════════════════════════════════════════════
  * §LUARELOAD — Lua script hot-reload
  *
@@ -1151,6 +1159,9 @@ UMF_API const char* umf_lua_reload_error(UmfLuaReloader* r);
 
 UMF_API bool umf_init(void);
 UMF_API void umf_shutdown(void);
+/* Exported thread entry the injector runs in the target to self-bootstrap
+ * (logging + IPC). Matches LPTHREAD_START_ROUTINE: unsigned long __stdcall. */
+UMF_API unsigned long __stdcall umf_runtime_start(void* param);
 
 /* Shared framework state (defined in umf_init.c). Internal to the
  * runtime module — populated by umf_init(). */

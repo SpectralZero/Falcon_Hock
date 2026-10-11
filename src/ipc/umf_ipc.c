@@ -220,11 +220,13 @@ static void handle_request(const char* line) {
             send_error(id, -32602, "missing 'code'");
             return;
         }
-        struct lua_State* L = umf_lua_create_sandbox();
+        /* Persistent sandbox so hooks installed by the script keep working
+         * after this call returns; execution is serialized with hook callbacks. */
+        struct lua_State* L = umf_lua_eval_state();
         if (!L) { send_error(id, -32603, "cannot create sandbox"); return; }
-        umf_lua_setup_api(L, NULL);
+        umf_lua_exec_lock();
         bool ok = umf_lua_run_string(L, code);
-        umf_lua_destroy_sandbox(L);
+        umf_lua_exec_unlock();
         send_result(id, ok ? "{\"ok\":true}" : "{\"ok\":false}");
 
     } else if (strcmp(method, "subscribe") == 0) {

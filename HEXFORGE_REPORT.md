@@ -145,13 +145,13 @@ Before clicking **Export Trainer (.exe)**:
 
 Ordered by impact. This is the "don't make me list features" backlog, drawn from what Cheat Engine / x64dbg / ReClass / FLiNG / WeMod / BepInEx provide.
 
-> **Update (latest pass): P0 1–3, P1 5–9, P2 10–11, P3 14–18 are now DONE.** See the checkmarks and §9 changelog. Remaining: P0 #4 (visual return-hook UI; available via Lua today), P2 #12–13 (visual hook manager, mod packaging), P3 #19, and the whole P4 platform track.
+> **Update (latest passes): P0 1–4, P1 5–9, P2 10–11, P3 14–19 are now DONE, and the injection/runtime path is fixed.** Remaining: P2 #12 (full visual hook manager with live arg inspection — basic install/list exists), P2 #13 (mod packaging), string **replace**-all, and the entire **P4 online platform** (needs a server/backend — can't be built offline). Everything else works.
 
 ### P0 — the big missing capabilities
 1. ✅ **"Find what writes/accesses this address"** — **Find Writes** tab (debugger + hardware breakpoint). Catches the exact instructions; "Disasm" jumps to them.
 2. ✅ **Patch / NOP / assemble** — Disasm right-click **NOP this instruction** with a **Patches** list + one-click **Revert / Revert all**.
 3. ✅ **AOB pattern scan** with wildcards — Scanner "search = AOB pattern"; also `umf.aob` in Lua.
-4. ⬜ **Return-value override hooks** exposed as a no-code UI. (Available **today via Lua**: `umf.hook(fn, function() return 0 end)` — see LUA_DEMO.md §8.)
+4. ✅ **Return-value override hooks** — Runtime tab "Quick hook (force return)" box (no code), plus `umf.hook` in Lua. God-mode/all-weapon in one click.
 
 ### P1 — robustness & discovery
 5. ✅ **Pointer-scan presets + revalidation** — Quick/Normal/Deep presets; a live "resolves" column via `resolve_chain`.
@@ -172,7 +172,7 @@ Ordered by impact. This is the "don't make me list features" backlog, drawn from
 16. ✅ **Settings tab** — accent theme (persisted to `hexforge.ini`), default writable-only, rights/about.
 17. ✅ **Toasts** — toast notifications for patches/writes. (Detachable panels still TODO.)
 18. ✅ **Game-image picker dialog** (+ trainer save/load dialogs). Brand icons are still clean drawn glyphs (drop-in official PNGs = TODO).
-19. ⬜ **Export options:** trainer window size/theme, author/credits, version, "safe mode" indicator.
+19. ✅ **Export options:** author + version baked in and shown in the trainer footer. (Window size/theme + safe-mode indicator still TODO.)
 
 ### P4 — the community/platform vision (not started — needs backend/online infra)
 20. ⬜ **Trainer registry/manifest format** (sign + version; metadata: game, version, author, hashes).
@@ -182,7 +182,12 @@ Ordered by impact. This is the "don't make me list features" backlog, drawn from
 ---
 
 ## 9. Changelog — latest pass
-- **Find Writes** tab: `DebugWatch` (DebugActiveProcess + DR0/DR7 hardware breakpoint on all threads; kill-on-exit disabled; clean disarm/detach on Stop).
+- **Injection fixed (was broken):** `Inject runtime` + `Connect` now work. Root causes were (a) the runtime's dependency DLLs (`Zydis.dll`, `lua.dll`, CRT) weren't on the target's search path, and (b) `DllMain` never started anything. Fixes: `inject_dll` adds the tool dir to the target's DLL search path then runs a new exported `umf_runtime_start` (boots logging + IPC pipe); CMake copies the CRT DLLs next to `umf_runtime.dll`. See LUA_DEMO.md §12.
+- **Return-override hook, no code (P0#4):** Runtime tab "Quick hook (force return)" box — enter address + return value → god mode / all-weapon with one click (builds a `umf.hook` call).
+- **Export options (P3#19):** author + version baked into the exported trainer and shown in its footer.
+- Full end-to-end **test checklist** added to LUA_DEMO.md §13.
+
+## 9b. Changelog — prior pass
 - **Disasm**: NOP/patch with original-bytes capture and Revert/Revert-all.
 - **Scanner**: AOB pattern (wildcards) and Text (ASCII/UTF-16) search modes; per-row **Set** live-write.
 - **Pointer Scan**: presets + live resolve/revalidate column.
@@ -203,18 +208,16 @@ Ordered by impact. This is the "don't make me list features" backlog, drawn from
 - Scanner no longer freezes/crashes on big processes; Next Scan race fixed.
 
 **Needs a manual smoke test (GUI, can't be unit-tested here)**
-- Export a trainer **with a cover image** and confirm it renders in the runner (WIC decode path).
-- Confirm GitHub/Discord buttons open the baked URLs.
-- Confirm per-cheat notes show as `(i)` tooltips in the exported trainer.
-- Confirm the new multi-res icon shows crisply in taskbar/Explorer/shortcut and as the trainer logo.
+- Run the full checklist in **LUA_DEMO.md §13** (covers every tab + the exported trainer + Lua).
+- Especially: **Inject runtime → Connect** (fixed this pass), **Find Writes** on a safe single-player game, and the Lua **Quick hook**.
 
 **Known limitations today**
-- No "find what writes" / code patching yet → per-value cheats are per-instance (see §3.1).
-- No AOB scan in the external tool yet → exported trainers use fixed addresses and can break on game updates/ASLR relaunch unless backed by a pointer path.
-- Hex view is read-only; no struct dissector; no watch list.
-- Brand icons are drawn glyphs, not official logos; game image is chosen by path (no file dialog yet).
+- **Find Writes** makes the tool the game's debugger — use only on offline/single-player targets; never on anti-cheat-protected online games.
+- Exported trainers use fixed addresses unless you back them with a pointer path or an AOB/Lua cheat; a game update can move a raw address.
+- No full visual hook manager with live argument inspection yet (basic install/list + Lua hooks exist); no mod-packaging UI; string search has no replace-all.
+- Brand icons are clean drawn glyphs, not official PNG logos (drop-in TODO).
 - 32-bit targets: the tool is x64; reading x86 processes works for data, but code features assume x64.
-- Anti-cheat protected online games are out of scope and unsafe to touch.
+- **P4 community platform** (publish/browse/install, accounts, signed manifests) needs an online backend and is not built — the `.hexforge` format + single-file export are its local foundation.
 
 ---
 

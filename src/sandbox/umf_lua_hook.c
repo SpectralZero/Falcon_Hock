@@ -38,6 +38,35 @@ static int       g_lua_hook_count = 0;
 static SRWLOCK   g_lua_lock = SRWLOCK_INIT;
 static __declspec(thread) int t_current_hook = -1;
 
+/* Persistent eval sandbox + a recursive lock serializing all Lua execution
+ * (interactive eval on the pipe thread vs. hook callbacks on game threads). */
+static lua_State*       g_eval_L = NULL;
+static CRITICAL_SECTION g_lua_exec_cs;
+static INIT_ONCE        g_exec_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_exec_cs(PINIT_ONCE o, PVOID p, PVOID* c) {
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_lua_exec_cs);
+    return TRUE;
+}
+void umf_lua_exec_lock(void) {
+    InitOnceExecuteOnce(&g_exec_once, init_exec_cs, NULL, NULL);
+    EnterCriticalSection(&g_lua_exec_cs);
+}
+void umf_lua_exec_unlock(void) {
+    LeaveCriticalSection(&g_lua_exec_cs);
+}
+lua_State* umf_lua_eval_state(void) {
+    umf_lua_exec_lock();
+    if (!g_eval_L) {
+        g_eval_L = umf_lua_create_sandbox();
+        if (g_eval_L) umf_lua_setup_api(g_eval_L, NULL);
+    }
+    lua_State* L = g_eval_L;
+    umf_lua_exec_unlock();
+    return L;
+}
+
 /* Anchor table in the Lua registry holding every hook callback, keyed by id,
  * so refs to functions passed to umf.hook() survive the caller returning. */
 #define UMF_LUA_HOOKS_TABLE "umf.hook_callbacks"
@@ -54,11 +83,12 @@ static uint64_t lua_dispatch(uint64_t* args, uint64_t id) {
     LuaHook* h = &g_lua_hooks[id];
     if (!h->active || !h->L) return 0;
 
+    umf_lua_exec_lock();   // serialize with interactive eval / other hooks
     lua_State* L = h->L;
     push_hooks_table(L);
     lua_rawgeti(L, -1, (lua_Integer)id + 1);
     lua_remove(L, -2);
-    if (!lua_isfunction(L, -1)) { lua_pop(L, 1); return 0; }
+    if (!lua_isfunction(L, -1)) { lua_pop(L, 1); umf_lua_exec_unlock(); return 0; }
 
     for (int i = 0; i < 4; i++)
         lua_pushinteger(L, (lua_Integer)args[i]);
@@ -73,11 +103,13 @@ static uint64_t lua_dispatch(uint64_t* args, uint64_t id) {
         UMF_ERROR("Lua hook %llu error: %s", (unsigned long long)id,
                   err ? err : "?");
         lua_pop(L, 1);
+        umf_lua_exec_unlock();
         return 0;
     }
 
     uint64_t result = (uint64_t)lua_tointeger(L, -1);
     lua_pop(L, 1);
+    umf_lua_exec_unlock();
     return result;
 }
 

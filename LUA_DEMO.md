@@ -211,3 +211,95 @@ reload-safe and shareable as a mod.
 - The sandbox blocks file/OS access and caps CPU/memory, so a bad script fails safely.
 - Hooks and patches are **in-process** — only after **Inject runtime**. They persist until the game closes or you revert them.
 - Only use on software you own / are authorized to modify. Don't touch anti-cheat-protected online games.
+
+---
+
+## 12. "Inject runtime" / "Connect" — why it failed before, and the fix (plain words)
+
+Earlier, **Inject** and **Connect** never worked and the Log showed a DLL error. Two reasons, both now fixed:
+
+1. **The runtime needed helper DLLs the game couldn't find.** `umf_runtime.dll` uses `Zydis.dll`, `lua.dll`, and the C-runtime DLLs. When injected into a game, Windows looked for them next to the *game*, not next to Hexforge, so loading failed. **Fix:** at inject time the tool now adds Hexforge's own folder to the game's DLL search path, and the build copies the C-runtime DLLs next to `umf_runtime.dll`. So all helpers are found.
+2. **Nothing started inside the game.** Even when the DLL loaded, it just sat there — it never opened its control pipe, so **Connect** had nothing to talk to. **Fix:** the DLL now has a start function (`umf_runtime_start`) that the tool runs right after loading; it boots logging + the pipe server. Then **Connect** finds it.
+
+**So now:** Attach → **Inject runtime** (the process gets a green `[runtime]` tag) → open **Runtime** → **Connect to runtime**. If it still fails:
+- Run Hexforge **as admin** (right-click → Run as administrator).
+- Make sure `umf_runtime.dll` plus `lua.dll`, `Zydis.dll` and the `*.dll` CRT files are in the **same folder** as `hexforge_tool.exe` (a normal build puts them there).
+- Don't try it on an **online/anti-cheat** game — that's blocked on purpose.
+
+---
+
+## 13. Full test — check everything works (simple step-by-step)
+
+Do these in order. Each step says what to click and what you should see. You need a
+simple offline game or app to attach to (e.g. a single-player game). Run Hexforge **as admin**.
+
+### A. Engine self-test (automatic, no game needed)
+1. Build, then run `build\Debug\umf_test.exe`.
+   - **Expect:** the last line says `399 checks, 0 failed`.
+
+### B. Attach + value cheat (Scanner)
+2. Left panel → type the game name → click it → **Attach**.
+   - **Expect:** top bar shows `attached pid ####`.
+3. **Scanner** tab → search = **Value**, type `int32`, value = your ammo number → **First Scan**.
+   - **Expect:** "Results: N matches".
+4. Shoot once in-game → set compare to **decreased** → **Next Scan**. Repeat until a few rows remain.
+   - **Expect:** the count drops each time.
+5. In a result row type a number in **new value** and click that row's **Set**.
+   - **Expect:** the in-game number changes immediately.
+
+### C. Unknown-value + AOB + text
+6. Click **Reset** → **First Scan (unknown)** → change value in-game → **Next Scan (decreased)** a few times.
+   - **Expect:** it narrows down even though you never typed the number.
+7. Switch search = **AOB pattern**, type a few hex bytes with `??`, **Scan AOB**.
+   - **Expect:** some matches (byte signature search works).
+8. Switch search = **Text string**, type a word you know is in the game (tick **UTF-16** for most games), **Scan text**.
+   - **Expect:** matches with addresses.
+
+### D. Watch / Hex / Struct
+9. Right-click a result → **Add to Watch** → open **Watch** tab.
+   - **Expect:** the value updates live; tick **Freeze** and it stops changing in-game.
+10. Right-click a result → **Browse in Hex** → tick **Live** in the **Hex** tab.
+    - **Expect:** changing bytes flash red; the Data Inspector shows int/float/double. Click a byte → edit → **Write byte** changes it in-game.
+11. Put an address in **Struct** tab.
+    - **Expect:** a live table of offsets as int/float/pointer.
+
+### E. Pointer scan
+12. Right-click a result → **Pointer scan** → pick **Normal** preset → **Scan**.
+    - **Expect:** some chains, each with a green **resolves** address. (Restart the game, re-attach, Scan again — a good chain still resolves.)
+
+### F. Find Writes + Disasm patch (all-weapon trick)
+13. **Find Writes** tab → paste your ammo address → **Start watching** → fire once in-game.
+    - **Expect:** one or more instruction rows appear (count goes up as you fire). Click **Stop**.
+14. Click **Disasm** on a hit row → right-click the highlighted instruction → **NOP this instruction**.
+    - **Expect:** it appears under **Patches**; ammo stops going down for **all** weapons. Click **Revert** to undo.
+
+### G. Trainer + export
+15. Right-click a result → **Add to Trainer** → **Trainer** tab. Set **Value**, **Mode** (Toggle), tick **Freeze** or assign a **Hotkey (F1)**.
+    - **Expect:** Freeze/hotkey changes the value live in-game.
+16. Click the row's **i** → type a note and pick a **freeze mode** (e.g. "No less than").
+    - **Expect:** with floor mode, the value never drops below your number but can rise.
+17. Fill **title**, **author**, **ver**, optional **GitHub/Discord**, click **Browse** to pick a cover image → **Export Trainer (.exe)**.
+    - **Expect:** `"<title>.exe"` is created next to the tool; status says "+image" if you added one.
+18. Run that exported `.exe` (as admin) while the game is open.
+    - **Expect:** a FLiNG-style window with your logo, the cover image, GitHub/Discord buttons, your cheats with editable **Value** boxes, and your author/version in the footer. Hotkeys work in-game.
+
+### H. Settings / Log
+19. **Settings** tab → click an accent color.
+    - **Expect:** the theme changes instantly and is remembered next launch (saved to `hexforge.ini`).
+20. **Log** tab → type in the filter, toggle autoscroll, click **Save to file**.
+    - **Expect:** filtered colored lines; a `hexforge-log.txt` appears next to the exe.
+
+### I. Runtime + Lua (the injected engine)
+21. Left panel → **Inject runtime** → the process shows green `[runtime]`.
+    - **Expect:** no DLL error in the Log (see §12 if it fails).
+22. **Runtime** tab → **Connect to runtime**.
+    - **Expect:** the mitigations/hooks/process buttons become active.
+23. Pick snippet **"Module base + read"** → **Load snippet** → edit the module name to your game → **Run Lua**.
+    - **Expect:** the Runtime log prints the base address and a value.
+24. Snippet **"Write a value"** → put your ammo address → **Run Lua**.
+    - **Expect:** ammo changes (Lua wrote it from inside the game).
+25. **Quick hook**: paste a function address, set **returns = 0**, **Install hook** (or run the god-mode snippet).
+    - **Expect:** "hook installed" in the response; the hooked behaviour changes (e.g. no damage). Click **Hooks** to list it.
+
+If every step behaves as described, the whole tool — scanner, trainer, exported trainer, debugger features, and the Lua engine — is working end to end.
+

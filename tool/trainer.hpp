@@ -35,6 +35,8 @@ struct TrainerDoc {
     std::string target;              // process exe name, e.g. "re3.exe"
     std::string github;              // optional community link
     std::string discord;             // optional community link
+    std::string author;              // optional author/credit
+    std::string version;             // optional version string
     std::string imageName;           // original cover-image filename (info only)
     std::vector<uint8_t> image;      // optional cover image bytes (PNG/JPG), embedded
     std::vector<Cheat> cheats;

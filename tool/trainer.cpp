@@ -25,6 +25,8 @@ std::string serialize_trainer(const TrainerDoc& doc) {
     o += "#TARGET=" + sanitize(doc.target) + "\n";
     if (!doc.github.empty())    o += "#GITHUB=" + sanitize(doc.github) + "\n";
     if (!doc.discord.empty())   o += "#DISCORD=" + sanitize(doc.discord) + "\n";
+    if (!doc.author.empty())    o += "#AUTHOR=" + sanitize(doc.author) + "\n";
+    if (!doc.version.empty())   o += "#VERSION=" + sanitize(doc.version) + "\n";
     if (!doc.imageName.empty()) o += "#IMAGE=" + sanitize(doc.imageName) + "\n";
     for (const auto& c : doc.cheats) {
         char line[512];
@@ -59,6 +61,8 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
                 else if (key == "TARGET") out.target = val;
                 else if (key == "GITHUB") out.github = val;
                 else if (key == "DISCORD") out.discord = val;
+                else if (key == "AUTHOR") out.author = val;
+                else if (key == "VERSION") out.version = val;
                 else if (key == "IMAGE") out.imageName = val;
             }
             continue;

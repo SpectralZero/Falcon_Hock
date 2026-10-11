@@ -103,6 +103,19 @@ target_link_libraries(umf_runtime PRIVATE
 # Export the UMF API
 target_compile_definitions(umf_runtime PRIVATE UMF_EXPORTS)
 
+# Make umf_runtime self-sufficient when injected into another process: copy the
+# C runtime DLLs (including the Debug CRT) next to it, so the target can resolve
+# them via the tool directory we add to its DLL search path at inject time.
+set(CMAKE_INSTALL_DEBUG_LIBRARIES ON)
+set(CMAKE_INSTALL_UCRT_LIBRARIES ON)
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP ON)
+include(InstallRequiredSystemLibraries)
+foreach(_crt ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+    add_custom_command(TARGET umf_runtime POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_crt}" "$<TARGET_FILE_DIR:umf_runtime>"
+        VERBATIM)
+endforeach()
+
 # ── Test Harness (standalone exe for unit testing) ──
 add_executable(umf_test
     tests/test_main.c

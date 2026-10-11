@@ -123,6 +123,48 @@ std::wstring runtime_dll_path() {
     return p;
 }
 
+// Run a single-argument function in the target via a remote thread. `arg` (if
+// given) is copied into the target and passed as the thread parameter.
+static bool remote_call(HANDLE h, void* fn, const void* arg, SIZE_T argBytes,
+                        DWORD waitMs, DWORD* exitCode) {
+    LPVOID remote = nullptr;
+    if (arg && argBytes) {
+        remote = VirtualAllocEx(h, nullptr, argBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!remote) return false;
+        if (!WriteProcessMemory(h, remote, arg, argBytes, nullptr)) {
+            VirtualFreeEx(h, remote, 0, MEM_RELEASE);
+            return false;
+        }
+    }
+    HANDLE th = CreateRemoteThread(h, nullptr, 0, (LPTHREAD_START_ROUTINE)fn, remote, 0, nullptr);
+    bool ok = false;
+    if (th) {
+        WaitForSingleObject(th, waitMs);
+        if (exitCode) GetExitCodeThread(th, exitCode);
+        CloseHandle(th);
+        ok = true;
+    }
+    if (remote) VirtualFreeEx(h, remote, 0, MEM_RELEASE);
+    return ok;
+}
+
+static uintptr_t remote_module_base(uint32_t pid, const wchar_t* name_lower) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    MODULEENTRY32W m;
+    m.dwSize = sizeof(m);
+    uintptr_t base = 0;
+    if (Module32FirstW(snap, &m)) {
+        do {
+            std::wstring n = m.szModule;
+            for (auto& ch : n) ch = (wchar_t)towlower(ch);
+            if (n == name_lower) { base = (uintptr_t)m.modBaseAddr; break; }
+        } while (Module32NextW(snap, &m));
+    }
+    CloseHandle(snap);
+    return base;
+}
+
 bool inject_dll(uint32_t pid, const std::wstring& dll, std::string& err) {
     if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
         err = "runtime DLL not found next to the tool: umf_runtime.dll";
@@ -137,40 +179,52 @@ bool inject_dll(uint32_t pid, const std::wstring& dll, std::string& err) {
         return false;
     }
 
-    bool ok = false;
-    SIZE_T bytes = (dll.size() + 1) * sizeof(wchar_t);
-    LPVOID remote = VirtualAllocEx(h, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remote) {
-        err = "VirtualAllocEx failed (error " + std::to_string(GetLastError()) + ")";
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    void* pSetDllDir = (void*)GetProcAddress(k32, "SetDllDirectoryW");
+    void* pLoadLib = (void*)GetProcAddress(k32, "LoadLibraryW");
+    if (!pLoadLib) { CloseHandle(h); err = "GetProcAddress(LoadLibraryW) failed"; return false; }
+
+    // 1. Add the tool's directory to the target's DLL search path so the
+    //    runtime's dependencies (Zydis.dll, lua.dll, CRT DLLs) resolve there.
+    std::wstring dir = dll;
+    size_t slash = dir.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) dir.resize(slash);
+    if (pSetDllDir)
+        remote_call(h, pSetDllDir, dir.c_str(), (dir.size() + 1) * sizeof(wchar_t), 5000, nullptr);
+
+    // 2. LoadLibraryW(full path) in the target.
+    remote_call(h, pLoadLib, dll.c_str(), (dll.size() + 1) * sizeof(wchar_t), 15000, nullptr);
+
+    // Success is "the module is now mapped" (the x64 thread exit code truncates
+    // the HMODULE, so we verify by enumerating the target's modules instead).
+    uintptr_t base = remote_module_base(pid, L"umf_runtime.dll");
+    if (!base) {
         CloseHandle(h);
+        err = "LoadLibrary failed in the target: a dependency could not be loaded "
+              "(Zydis.dll / lua.dll, or the Debug CRT). Keep those DLLs beside the tool, "
+              "or use the Release build whose CRT the system already has.";
         return false;
     }
 
-    if (WriteProcessMemory(h, remote, dll.c_str(), bytes, nullptr)) {
-        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-        auto load = (LPTHREAD_START_ROUTINE)GetProcAddress(k32, "LoadLibraryW");
-        HANDLE th = CreateRemoteThread(h, nullptr, 0, load, remote, 0, nullptr);
-        if (th) {
-            WaitForSingleObject(th, 15000);
-            DWORD code = 0;
-            GetExitCodeThread(th, &code);
-            CloseHandle(th);
-            if (code != 0) {
-                ok = true;
-            } else {
-                err = "LoadLibraryW returned 0 in the target (DLL failed to load; "
-                      "arch mismatch or dependency missing)";
-            }
-        } else {
-            err = "CreateRemoteThread failed (error " + std::to_string(GetLastError()) + ")";
+    // 3. Bootstrap: run umf_runtime_start in the target so it starts its IPC
+    //    pipe server. Compute the export RVA from a local, non-executing load.
+    HMODULE local = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    bool started = false;
+    if (local) {
+        FARPROC startLocal = GetProcAddress(local, "umf_runtime_start");
+        if (startLocal) {
+            uintptr_t rva = (uintptr_t)startLocal - (uintptr_t)local;
+            HANDLE th = CreateRemoteThread(h, nullptr, 0,
+                                           (LPTHREAD_START_ROUTINE)(base + rva), nullptr, 0, nullptr);
+            if (th) { WaitForSingleObject(th, 8000); CloseHandle(th); started = true; }
         }
-    } else {
-        err = "WriteProcessMemory failed (error " + std::to_string(GetLastError()) + ")";
+        FreeLibrary(local);
     }
-
-    VirtualFreeEx(h, remote, 0, MEM_RELEASE);
     CloseHandle(h);
-    return ok;
+    if (!started)
+        err = "runtime loaded but bootstrap (umf_runtime_start) did not run; "
+              "rebuild the DLL. Connect may not find a pipe.";
+    return true;
 }
 
 // ── Target ──────────────────────────────────────────────────────────────────
