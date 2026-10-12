@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -344,13 +345,83 @@ static bool approx(double a, double b, ScanType t) {
 static const size_t kScanCap = 2'000'000;
 static const size_t kUnknownCap = 12'000'000;
 
-static uint64_t total_scan_bytes(const std::vector<RegionEntry>& regs, bool writable_only) {
-    uint64_t total = 0;
+// ── Parallel region scanning ─────────────────────────────────────────────────
+// The target's usable regions are split into fixed-size jobs and consumed by a
+// pool of worker threads (one per core). Each worker reads a job with a single
+// large ReadProcessMemory and appends matches to its own thread-local vectors,
+// so there is no shared-state contention in the hot loop; results merge at the
+// end. This turns multi-minute scans on big 64-bit games into a few seconds.
+namespace {
+struct ScanJob { uintptr_t base; size_t size; };
+struct LocalOut { std::vector<uintptr_t> a; std::vector<double> v; };
+// per-chunk callback: inspect [buf,buf+len) that lives at `base`, append hits.
+using ChunkFn = std::function<void(const uint8_t*, size_t, uintptr_t, LocalOut&)>;
+}
+
+static void run_parallel(HANDLE h, const std::vector<RegionEntry>& regs, bool writable_only,
+                         size_t overlap, size_t cap,
+                         std::atomic<bool>* cancel, std::atomic<float>* progress,
+                         const ChunkFn& fn,
+                         std::vector<uintptr_t>& outA, std::vector<double>& outV) {
+    const size_t CHUNK = 16u << 20;   // 16 MB reads amortise RPM overhead
+    std::vector<ScanJob> jobs;
     for (const auto& r : regs) {
         bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
-        if (usable) total += r.size;
+        if (!usable) continue;
+        size_t step = (overlap < CHUNK) ? (CHUNK - overlap) : CHUNK;
+        for (size_t off = 0; off < r.size; off += step) {
+            size_t len = r.size - off;
+            if (len > CHUNK) len = CHUNK;
+            jobs.push_back({r.base + off, len});
+            if (len < CHUNK) break;
+        }
     }
-    return total ? total : 1;
+    uint64_t total = 0;
+    for (const auto& j : jobs) total += j.size;
+    if (!total) total = 1;
+
+    unsigned nthreads = std::thread::hardware_concurrency();
+    if (!nthreads) nthreads = 4;
+    if ((size_t)nthreads > jobs.size()) nthreads = (unsigned)(jobs.empty() ? 1 : jobs.size());
+
+    std::atomic<size_t> nextJob{0};
+    std::atomic<uint64_t> done{0};
+    std::vector<LocalOut> locals(nthreads);
+
+    auto worker = [&](unsigned tid) {
+        std::vector<uint8_t> buf;
+        LocalOut& out = locals[tid];
+        for (;;) {
+            if (cancel && cancel->load()) break;
+            size_t i = nextJob.fetch_add(1);
+            if (i >= jobs.size()) break;
+            const ScanJob& job = jobs[i];
+            buf.resize(job.size);
+            SIZE_T got = 0;
+            if (ReadProcessMemory(h, (LPCVOID)job.base, buf.data(), job.size, &got) && got > 0)
+                fn(buf.data(), (size_t)got, job.base, out);
+            uint64_t d = done.fetch_add(job.size) + job.size;
+            if (progress) progress->store((float)((double)d / (double)total));
+        }
+    };
+
+    std::vector<std::thread> pool;
+    for (unsigned t = 1; t < nthreads; ++t) pool.emplace_back(worker, t);
+    worker(0);                       // run one worker on this thread too
+    for (auto& th : pool) th.join();
+    if (progress) progress->store(1.0f);
+
+    size_t tot = 0;
+    for (auto& l : locals) tot += l.a.size();
+    outA.reserve(tot < cap ? tot : cap);
+    outV.reserve(tot < cap ? tot : cap);
+    for (auto& l : locals) {
+        for (size_t i = 0; i < l.a.size() && outA.size() < cap; ++i) {
+            outA.push_back(l.a[i]);
+            outV.push_back(l.v[i]);
+        }
+        if (outA.size() >= cap) break;
+    }
 }
 
 size_t Target::first_scan(ScanType t, double value, bool writable_only,
@@ -359,42 +430,16 @@ size_t Target::first_scan(ScanType t, double value, bool writable_only,
     stype_ = t;
     if (!h_) return 0;
     size_t ts = type_size(t);
-
     auto regs = regions();
-    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
-    std::vector<uintptr_t> rr;   // built locally, published under lock at the end
+    std::vector<uintptr_t> rr;
     std::vector<double> ll;
-    std::vector<uint8_t> buf;
-    for (const auto& r : regs) {
-        if (cancel && cancel->load()) break;
-        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
-        if (!usable) continue;
-
-        const size_t CHUNK = 1u << 20;
-        for (size_t off = 0; off < r.size; off += CHUNK) {
-            if (cancel && cancel->load()) break;
-            size_t len = r.size - off;
-            if (len > CHUNK) len = CHUNK;
-            if (len < ts) break;
-            buf.resize(len);
-            SIZE_T got = 0;
-            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= ts) {
-                size_t usable_len = (size_t)got;
-                for (size_t o = 0; o + ts <= usable_len; o += ts) {
-                    double v = read_as_double(buf.data() + o, t);
-                    if (approx(v, value, t)) {
-                        rr.push_back(r.base + off + o);
-                        ll.push_back(v);
-                        if (rr.size() >= kScanCap) { done = total; goto done_label; }
-                    }
-                }
+    run_parallel(h_, regs, writable_only, 0, kScanCap, cancel, progress,
+        [ts, t, value](const uint8_t* buf, size_t len, uintptr_t base, LocalOut& out) {
+            for (size_t o = 0; o + ts <= len; o += ts) {
+                double v = read_as_double(buf + o, t);
+                if (approx(v, value, t)) { out.a.push_back(base + o); out.v.push_back(v); }
             }
-            done += len;
-            if (progress) progress->store((float)((double)done / (double)total));
-        }
-    }
-done_label:
-    if (progress) progress->store(1.0f);
+        }, rr, ll);
     std::lock_guard<std::mutex> lk(mtx_);
     results_.swap(rr);
     last_.swap(ll);
@@ -407,39 +452,16 @@ size_t Target::first_scan_unknown(ScanType t, bool writable_only,
     stype_ = t;
     if (!h_) return 0;
     size_t ts = type_size(t);
-
     auto regs = regions();
-    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
     std::vector<uintptr_t> rr;
     std::vector<double> ll;
-    std::vector<uint8_t> buf;
-    for (const auto& r : regs) {
-        if (cancel && cancel->load()) break;
-        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
-        if (!usable) continue;
-
-        const size_t CHUNK = 1u << 20;
-        for (size_t off = 0; off < r.size; off += CHUNK) {
-            if (cancel && cancel->load()) break;
-            size_t len = r.size - off;
-            if (len > CHUNK) len = CHUNK;
-            if (len < ts) break;
-            buf.resize(len);
-            SIZE_T got = 0;
-            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= ts) {
-                size_t usable_len = (size_t)got;
-                for (size_t o = 0; o + ts <= usable_len; o += ts) {
-                    rr.push_back(r.base + off + o);
-                    ll.push_back(read_as_double(buf.data() + o, t));
-                    if (rr.size() >= kUnknownCap) { done = total; goto done_label; }
-                }
+    run_parallel(h_, regs, writable_only, 0, kUnknownCap, cancel, progress,
+        [ts, t](const uint8_t* buf, size_t len, uintptr_t base, LocalOut& out) {
+            for (size_t o = 0; o + ts <= len; o += ts) {
+                out.a.push_back(base + o);
+                out.v.push_back(read_as_double(buf + o, t));
             }
-            done += len;
-            if (progress) progress->store((float)((double)done / (double)total));
-        }
-    }
-done_label:
-    if (progress) progress->store(1.0f);
+        }, rr, ll);
     std::lock_guard<std::mutex> lk(mtx_);
     results_.swap(rr);
     last_.swap(ll);
@@ -531,45 +553,49 @@ size_t Target::aob_scan(const std::vector<uint8_t>& pattern, const std::vector<b
     if (!h_ || pattern.empty()) return 0;
     size_t plen = pattern.size();
 
+    // Index of the first non-wildcard byte: we memchr for it to skip the vast
+    // majority of positions instead of comparing the full pattern everywhere.
+    int firstFixed = -1;
+    for (size_t k = 0; k < plen; ++k)
+        if (mask[k]) { firstFixed = (int)k; break; }
+
     auto regs = regions();
-    uint64_t total = total_scan_bytes(regs, writable_only), done = 0;
     std::vector<uintptr_t> rr;
     std::vector<double> ll;
-    std::vector<uint8_t> buf;
-    const size_t CHUNK = 1u << 20;
-    for (const auto& r : regs) {
-        if (cancel && cancel->load()) break;
-        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
-        if (!usable) continue;
-        // Overlap chunks by plen-1 so matches on a boundary are not missed.
-        for (size_t off = 0; off < r.size; off += (CHUNK - (plen - 1))) {
-            if (cancel && cancel->load()) break;
-            size_t len = r.size - off;
-            if (len > CHUNK) len = CHUNK;
-            if (len < plen) break;
-            buf.resize(len);
-            SIZE_T got = 0;
-            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= plen) {
-                size_t n = (size_t)got;
-                for (size_t o = 0; o + plen <= n; ++o) {
-                    bool hit = true;
-                    for (size_t k = 0; k < plen; ++k) {
-                        if (mask[k] && buf[o + k] != pattern[k]) { hit = false; break; }
-                    }
-                    if (hit) {
-                        rr.push_back(r.base + off + o);
-                        ll.push_back(0.0);
-                        if (rr.size() >= kScanCap) { done = total; goto done_label; }
-                    }
-                }
+    run_parallel(h_, regs, writable_only, plen - 1, kScanCap, cancel, progress,
+        [&pattern, &mask, plen, firstFixed](const uint8_t* buf, size_t len, uintptr_t base, LocalOut& out) {
+            if (len < plen) return;
+            size_t limit = len - plen;   // last valid start offset
+            auto full_match = [&](size_t s) {
+                for (size_t k = 0; k < plen; ++k)
+                    if (mask[k] && buf[s + k] != pattern[k]) return false;
+                return true;
+            };
+            if (firstFixed < 0) {   // all wildcards: every position matches
+                for (size_t s = 0; s <= limit; ++s) { out.a.push_back(base + s); out.v.push_back(0.0); }
+                return;
             }
-            done += len;
-            if (progress) progress->store((float)((double)done / (double)total));
-            if (len < CHUNK) break;
-        }
-    }
-done_label:
-    if (progress) progress->store(1.0f);
+            uint8_t fb = pattern[firstFixed];
+            size_t searchFrom = (size_t)firstFixed;
+            while (searchFrom < len) {
+                const uint8_t* found = (const uint8_t*)memchr(buf + searchFrom, fb, len - searchFrom);
+                if (!found) break;
+                size_t j = (size_t)(found - buf);
+                size_t start = j - (size_t)firstFixed;
+                if (j >= (size_t)firstFixed && start <= limit && full_match(start)) {
+                    out.a.push_back(base + start);
+                    out.v.push_back(0.0);
+                }
+                searchFrom = j + 1;
+            }
+        }, rr, ll);
+
+    // Chunks overlap by plen-1, so a match on a boundary can be reported twice;
+    // de-duplicate.
+    std::sort(rr.begin(), rr.end());
+    rr.erase(std::unique(rr.begin(), rr.end()), rr.end());
+    ll.assign(rr.size(), 0.0);
+
     std::lock_guard<std::mutex> lk(mtx_);
     results_.swap(rr);
     last_.swap(ll);

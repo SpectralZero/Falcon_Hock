@@ -279,6 +279,7 @@ struct App {
     std::string exportStatus;
     bool hotkeysDirty = false;
     bool gotoTrainer = false;   // wizard asks the UI to open the Trainer tab
+    const char* pendingTab = nullptr;   // request the tab bar to switch tabs
 
     // trainer wizard (guided scanner)
     int wizStep = 0;            // 0 pick, 1 first value, 2 narrow/finish
@@ -689,9 +690,9 @@ static void drawScanner(App& app) {
                              fmtValueAt(app.target, res[i], scanTypeOf(app.scanType)).c_str());
                     app.wantEditPopup = true;
                 }
-                if (ImGui::MenuItem("Browse in Hex")) snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)res[i]);
-                if (ImGui::MenuItem("Disassemble")) snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)res[i]);
-                if (ImGui::MenuItem("Pointer scan")) snprintf(app.ptrAddr, sizeof(app.ptrAddr), "%llX", (unsigned long long)res[i]);
+                if (ImGui::MenuItem("Browse in Hex")) { snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)res[i]); app.pendingTab = "Hex"; }
+                if (ImGui::MenuItem("Disassemble")) { snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)res[i]); app.pendingTab = "Disasm"; }
+                if (ImGui::MenuItem("Pointer scan")) { snprintf(app.ptrAddr, sizeof(app.ptrAddr), "%llX", (unsigned long long)res[i]); app.pendingTab = "Pointer Scan"; }
                 if (ImGui::MenuItem("Copy address")) ImGui::SetClipboardText(a);
                 ImGui::EndPopup();
             }
@@ -884,7 +885,7 @@ static void drawMemoryMap(App& app) {
             char a[32];
             snprintf(a, sizeof(a), "%016llX", (unsigned long long)r.base);
             if (ImGui::Selectable(a, false, ImGuiSelectableFlags_SpanAllColumns))
-                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)r.base);
+                { snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)r.base); app.pendingTab = "Hex"; }
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%llu KB", (unsigned long long)(r.size / 1024));
             ImGui::TableSetColumnIndex(2);
@@ -910,7 +911,13 @@ static void drawModules(App& app) {
         for (const auto& m : app.modules) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(w2u(m.name).c_str());
+            ImGui::PushID((int)m.base);
+            if (ImGui::Selectable(w2u(m.name).c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)m.base);
+                snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)m.base);
+                app.pendingTab = "Hex";
+            }
+            ImGui::PopID();
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%016llX", (unsigned long long)m.base);
             ImGui::TableSetColumnIndex(2);
@@ -1254,6 +1261,7 @@ static void drawFindWrites(App& app) {
                 // RIP is just after the write; back up a little so the writer shows.
                 uintptr_t a = hits[i].rip > 24 ? hits[i].rip - 24 : hits[i].rip;
                 snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)a);
+                app.pendingTab = "Disasm";
             }
             ImGui::PopID();
         }
@@ -2063,8 +2071,11 @@ static void drawUI(App& app) {
     drawTargets(app);
     ImGui::SameLine();
 
-    ImGui::BeginChild("right", ImVec2(0, 0), false);
+    ImGui::BeginChild("right", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
     if (ImGui::BeginTabBar("tabs")) {
+        auto tabFlags = [&](const char* name) -> ImGuiTabItemFlags {
+            return (app.pendingTab && strcmp(app.pendingTab, name) == 0) ? ImGuiTabItemFlags_SetSelected : 0;
+        };
         if (ImGui::BeginTabItem("Wizard")) { drawWizard(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Scanner")) { drawScanner(app); ImGui::EndTabItem(); }
         ImGuiTabItemFlags trFlags = app.gotoTrainer ? ImGuiTabItemFlags_SetSelected : 0;
@@ -2074,7 +2085,7 @@ static void drawUI(App& app) {
         if (ImGui::BeginTabItem("Pointer Scan")) { drawPointerScan(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Find Writes")) { drawFindWrites(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Disasm")) { drawDisasm(app); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Hex")) { drawHex(app); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Hex", nullptr, tabFlags("Hex"))) { drawHex(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Struct")) { drawStruct(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Memory Map")) { drawMemoryMap(app); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Modules")) { drawModules(app); ImGui::EndTabItem(); }
@@ -2084,6 +2095,7 @@ static void drawUI(App& app) {
         if (ImGui::BeginTabItem("Log")) { drawLog(app); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
+    app.pendingTab = nullptr;
     ImGui::EndChild();
 
     drawToasts(app);
