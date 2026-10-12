@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -20,13 +22,21 @@ namespace hx {
 struct Cheat {
     uintptr_t addr = 0;
     int type = 2;            // ScanType index (int32)
-    bool freeze = false;     // currently locking the value every frame
+    bool freeze = false;     // currently locking the value every frame (or patch ON)
     int hotkey = 0;          // VK code (0 = none)
     int mode = 0;            // 0 = toggle freeze, 1 = set once
     int freezeMode = 0;      // 0 = locked, 1 = no less than (floor), 2 = no more than (cap)
+    int kind = 0;            // 0 = value cheat, 1 = AOB code patch (NOP)
     char label[48] = "value";
-    char value[32] = "0";
+    char value[32] = "0";    // kind 0: value; kind 1: number of bytes to NOP
     char note[128] = "";     // optional "!" tip shown in the trainer (e.g. game caps)
+    char aob[192] = "";      // kind 1: byte pattern to locate the instruction
+
+    // transient runtime state for AOB patches (never serialized)
+    uintptr_t rtAddr = 0;
+    bool rtApplied = false;
+    uint8_t rtOrig[16] = {};
+    int rtOrigLen = 0;
 };
 
 // A whole trainer: a titled list of cheats bound to one target process.
@@ -85,6 +95,36 @@ inline void write_typed(const Target& t, uintptr_t addr, ScanType ty, double v) 
         case ScanType::F64: *(double*)b  = v; break;
     }
     t.write(addr, b, type_size(ty));
+}
+
+// Apply or revert an AOB code patch (kind == 1). On enable, resolve the pattern,
+// save the original bytes, and NOP `value` bytes; on disable, restore them. This
+// is what makes a cheat survive restarts (it re-finds the code each session).
+inline void apply_patch_cheat(Target& t, Cheat& c, bool enable) {
+    if (c.kind != 1) return;
+    int n = atoi(c.value);
+    if (n <= 0) n = 1;
+    if (n > 16) n = 16;
+    if (enable) {
+        if (c.rtApplied) return;
+        std::vector<uint8_t> pat;
+        std::vector<bool> mask;
+        if (!parse_aob(c.aob, pat, mask)) return;
+        uintptr_t a = t.aob_find_first(pat, mask, false);
+        if (!a) return;
+        if (!t.read(a, c.rtOrig, (size_t)n)) return;
+        uint8_t nops[16];
+        memset(nops, 0x90, (size_t)n);
+        if (!t.write(a, nops, (size_t)n)) return;
+        c.rtAddr = a;
+        c.rtOrigLen = n;
+        c.rtApplied = true;
+    } else {
+        if (c.rtApplied && c.rtAddr && c.rtOrigLen > 0) {
+            t.write(c.rtAddr, c.rtOrig, (size_t)c.rtOrigLen);
+            c.rtApplied = false;
+        }
+    }
 }
 
 // Hotkey mapping: combo index 0 = none, 1..12 = F1..F12.

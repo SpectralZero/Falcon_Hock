@@ -374,11 +374,16 @@ static void StyleTrainer() {
 }
 
 static void draw(Runner& r) {
-    // Keep every frozen Toggle cheat locked to its value.
+    // Keep every frozen Toggle cheat locked; arm/revert AOB patches on change.
     if (r.attached) {
-        for (auto& c : r.doc.cheats)
-            if (c.mode == 0 && c.freeze)
+        for (auto& c : r.doc.cheats) {
+            if (c.kind == 1) {
+                if (c.freeze && !c.rtApplied) hx::apply_patch_cheat(r.target, c, true);
+                else if (!c.freeze && c.rtApplied) hx::apply_patch_cheat(r.target, c, false);
+            } else if (c.mode == 0 && c.freeze) {
                 apply_freeze(r, c);
+            }
+        }
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -536,7 +541,11 @@ static void draw(Runner& r) {
                     ImGui::TextUnformatted(c.hotkey ? hx::hk_name(c.hotkey) : "-");
 
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(ok ? hx::fmt_value_at(r.target, c.addr, hx::scan_type_of(c.type)).c_str() : "-");
+                    if (c.kind == 1)
+                        ImGui::TextColored(c.rtApplied ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(0.6f, 0.6f, 0.65f, 1),
+                                           c.rtApplied ? "ON" : "off");
+                    else
+                        ImGui::TextUnformatted(ok ? hx::fmt_value_at(r.target, c.addr, hx::scan_type_of(c.type)).c_str() : "-");
 
                     // Editable amount: change ammo/money here without recreating anything.
                     ImGui::TableSetColumnIndex(3);

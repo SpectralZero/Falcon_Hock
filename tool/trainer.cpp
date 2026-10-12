@@ -29,11 +29,11 @@ std::string serialize_trainer(const TrainerDoc& doc) {
     if (!doc.version.empty())   o += "#VERSION=" + sanitize(doc.version) + "\n";
     if (!doc.imageName.empty()) o += "#IMAGE=" + sanitize(doc.imageName) + "\n";
     for (const auto& c : doc.cheats) {
-        char line[512];
-        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d|%s|%d\n",
+        char line[768];
+        snprintf(line, sizeof(line), "%s|%llX|%d|%s|%d|%d|%d|%s|%d|%d|%s\n",
                  sanitize(c.label).c_str(), (unsigned long long)c.addr, c.type,
                  sanitize(c.value).c_str(), c.freeze ? 1 : 0, c.hotkey, c.mode,
-                 sanitize(c.note).c_str(), c.freezeMode);
+                 sanitize(c.note).c_str(), c.freezeMode, c.kind, sanitize(c.aob).c_str());
         o += line;
     }
     return o;
@@ -68,11 +68,11 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
             continue;
         }
 
-        // cheat line: label|addr|type|value|freeze|hotkey|mode|note|freezeMode
-        std::string f[9];
+        // cheat line: label|addr|type|value|freeze|hotkey|mode|note|freezeMode|kind|aob
+        std::string f[11];
         int nf = 0;
         size_t start = 0;
-        for (size_t i = 0; i <= line.size() && nf < 9; ++i) {
+        for (size_t i = 0; i <= line.size() && nf < 11; ++i) {
             if (i == line.size() || line[i] == '|') {
                 f[nf++] = line.substr(start, i - start);
                 start = i + 1;
@@ -90,6 +90,10 @@ bool parse_trainer(const std::string& text, TrainerDoc& out) {
             c.mode = (nf >= 7) ? atoi(f[6].c_str()) : 0;
             if (nf >= 8) snprintf(c.note, sizeof(c.note), "%s", f[7].c_str());
             c.freezeMode = (nf >= 9) ? atoi(f[8].c_str()) : 0;
+            c.kind = (nf >= 10) ? atoi(f[9].c_str()) : 0;
+            if (nf >= 11) snprintf(c.aob, sizeof(c.aob), "%s", f[10].c_str());
+            // A patch cheat should start disarmed regardless of the saved freeze bit.
+            if (c.kind == 1) c.freeze = false;
             out.cheats.push_back(c);
         }
     }

@@ -97,6 +97,11 @@ public:
                        std::atomic<bool>* cancel = nullptr,
                        std::atomic<float>* progress = nullptr);
 
+    // Resolve the first address matching a byte pattern, without touching the
+    // scan result set (used to apply AOB code patches). 0 if not found.
+    uintptr_t aob_find_first(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
+                             bool writable_only) const;
+
     void clear_scan();
     ScanType scan_type() const { return stype_; }
 

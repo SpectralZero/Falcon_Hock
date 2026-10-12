@@ -615,6 +615,51 @@ size_t Target::string_scan(const std::string& needle, bool utf16, bool writable_
     return aob_scan(pat, mask, writable_only, cancel, progress);
 }
 
+uintptr_t Target::aob_find_first(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
+                                 bool writable_only) const {
+    if (!h_ || pattern.empty()) return 0;
+    size_t plen = pattern.size();
+    int firstFixed = -1;
+    for (size_t k = 0; k < plen; ++k)
+        if (mask[k]) { firstFixed = (int)k; break; }
+    std::vector<uint8_t> buf;
+    const size_t CHUNK = 4u << 20;
+    for (const auto& r : regions()) {
+        bool usable = writable_only ? is_writable(r.protect) : is_readable(r.protect);
+        if (!usable) continue;
+        size_t step = (plen - 1 < CHUNK) ? (CHUNK - (plen - 1)) : CHUNK;
+        for (size_t off = 0; off < r.size; off += step) {
+            size_t len = r.size - off;
+            if (len > CHUNK) len = CHUNK;
+            if (len < plen) break;
+            buf.resize(len);
+            SIZE_T got = 0;
+            if (ReadProcessMemory(h_, (LPCVOID)(r.base + off), buf.data(), len, &got) && got >= plen) {
+                size_t n = (size_t)got, limit = n - plen;
+                auto full = [&](size_t s) {
+                    for (size_t k = 0; k < plen; ++k)
+                        if (mask[k] && buf[s + k] != pattern[k]) return false;
+                    return true;
+                };
+                if (firstFixed < 0) return r.base + off;   // all wildcards
+                uint8_t fb = pattern[firstFixed];
+                size_t from = (size_t)firstFixed;
+                while (from < n) {
+                    const uint8_t* f = (const uint8_t*)memchr(buf.data() + from, fb, n - from);
+                    if (!f) break;
+                    size_t j = (size_t)(f - buf.data());
+                    size_t start = j - (size_t)firstFixed;
+                    if (j >= (size_t)firstFixed && start <= limit && full(start))
+                        return r.base + off + start;
+                    from = j + 1;
+                }
+            }
+            if (len < CHUNK) break;
+        }
+    }
+    return 0;
+}
+
 std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
                                            int64_t max_offset, int max_results) {
     std::vector<PtrChain> chains;
@@ -622,15 +667,33 @@ std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
     if (max_level < 1) max_level = 1;
     if (max_level > 6) max_level = 6;
 
-    // 1. Build an index of every plausible pointer slot: (value -> slot addr).
+    // 1. Build an index of real pointer slots: (value -> slot addr). We only
+    //    keep values that actually point into a committed region, so the index
+    //    stays small enough to cover module space (the old "any 48-bit value"
+    //    rule exhausted a 4M cap in the first heaps and returned 0 chains on
+    //    64-bit games).
     const uintptr_t kLo = 0x10000, kHi = 0x00007FFFFFFFFFFFULL;
+    auto regs_all = regions();
+
+    std::vector<std::pair<uintptr_t, uintptr_t>> ranges;   // (base, end), sorted by base
+    ranges.reserve(regs_all.size());
+    for (const auto& r : regs_all) ranges.push_back({r.base, r.base + r.size});
+    std::sort(ranges.begin(), ranges.end());
+    auto in_committed = [&](uintptr_t v) -> bool {
+        size_t lo = 0, hi = ranges.size();
+        while (lo < hi) { size_t mid = (lo + hi) / 2; if (ranges[mid].first <= v) lo = mid + 1; else hi = mid; }
+        if (lo == 0) return false;
+        return v >= ranges[lo - 1].first && v < ranges[lo - 1].second;
+    };
+
+    const size_t kIdxCap = 8u << 20;   // 8M real pointers (~128 MB)
     std::vector<std::pair<uintptr_t, uintptr_t>> idx;   // (value, slot)
     idx.reserve(1 << 20);
 
     std::vector<uint8_t> buf;
-    for (const auto& r : regions()) {
+    for (const auto& r : regs_all) {
         if (!is_readable(r.protect)) continue;
-        const size_t CHUNK = 1u << 20;
+        const size_t CHUNK = 4u << 20;
         for (size_t off = 0; off < r.size; off += CHUNK) {
             size_t len = r.size - off;
             if (len > CHUNK) len = CHUNK;
@@ -642,13 +705,13 @@ std::vector<PtrChain> Target::pointer_scan(uintptr_t target, int max_level,
             size_t n = (size_t)got;
             for (size_t o = 0; o + 8 <= n; o += 8) {
                 uintptr_t v = *(uintptr_t*)(buf.data() + o);
-                if (v >= kLo && v < kHi)
+                if (v >= kLo && v < kHi && in_committed(v))
                     idx.push_back({v, r.base + off + o});
-                if (idx.size() >= (1u << 22)) break;   // 4M cap
+                if (idx.size() >= kIdxCap) break;
             }
-            if (idx.size() >= (1u << 22)) break;
+            if (idx.size() >= kIdxCap) break;
         }
-        if (idx.size() >= (1u << 22)) break;
+        if (idx.size() >= kIdxCap) break;
     }
     std::sort(idx.begin(), idx.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });

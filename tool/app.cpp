@@ -1200,6 +1200,49 @@ static void drawWatch(App& app) {
 }
 
 // ── Find what writes/accesses an address (debugger + hardware breakpoint) ─────
+// Reconstruct the AOB signature of the instruction that triggered a write. The
+// trap RIP points just after the writing instruction, so we decode backward to
+// find the instruction that ends at RIP, then emit its bytes (plus the next
+// instruction for uniqueness). writerLen receives the writer's length for NOP.
+static std::string make_aob_from_rip(App& app, uintptr_t rip, int* writerLen) {
+    if (writerLen) *writerLen = 0;
+    uint8_t code[48] = {};
+    uintptr_t start = rip > 16 ? rip - 16 : rip;
+    if (!app.target.read(start, code, sizeof(code))) return "";
+    size_t target = (size_t)(rip - start);
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+    for (size_t c = 0; c <= target; ++c) {
+        size_t off = c;
+        bool aligned = false;
+        size_t writerStart = c;
+        while (off < sizeof(code)) {
+            ZydisDecodedInstruction ins;
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, code + off, sizeof(code) - off, &ins)))
+                break;
+            if (off + ins.length == target) { writerStart = off; aligned = true; break; }
+            if (off + ins.length > target) break;   // misaligned start
+            off += ins.length;
+        }
+        if (!aligned) continue;
+        int wlen = (int)(target - writerStart);
+        size_t end = target;
+        ZydisDecodedInstruction nx;   // include the next instruction for uniqueness
+        if (ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, code + target, sizeof(code) - target, &nx)))
+            end = target + nx.length;
+        std::string aob;
+        for (size_t i = writerStart; i < end && i < sizeof(code); ++i) {
+            char b[4];
+            snprintf(b, sizeof(b), "%02X ", code[i]);
+            aob += b;
+        }
+        while (!aob.empty() && aob.back() == ' ') aob.pop_back();
+        if (writerLen) *writerLen = wlen > 0 ? wlen : 1;
+        return aob;
+    }
+    return "";
+}
+
 static void drawFindWrites(App& app) {
     bool attached = app.target.attached();
     ImGui::TextColored(ImVec4(0.49f, 0.36f, 1.0f, 1.0f), "Find what writes/reads an address");
@@ -1244,8 +1287,8 @@ static void drawFindWrites(App& app) {
     if (ImGui::BeginTable("fw", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupColumn("Instruction (RIP)", ImGuiTableColumnFlags_WidthFixed, 160);
         ImGui::TableSetupColumn("Module+Offset");
-        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 55);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 260);
         ImGui::TableHeadersRow();
         for (size_t i = 0; i < hits.size(); ++i) {
             ImGui::TableNextRow();
@@ -1262,6 +1305,47 @@ static void drawFindWrites(App& app) {
                 uintptr_t a = hits[i].rip > 24 ? hits[i].rip - 24 : hits[i].rip;
                 snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)a);
                 app.pendingTab = "Disasm";
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Make AOB")) {
+                int wlen = 0;
+                std::string aob = make_aob_from_rip(app, hits[i].rip, &wlen);
+                if (!aob.empty()) {
+                    snprintf(app.aobText, sizeof(app.aobText), "%s", aob.c_str());
+                    app.scanKind = 1;
+                    ImGui::SetClipboardText(aob.c_str());
+                    // Pre-fill a ready-to-run Lua patch using the real signature.
+                    snprintf(app.luaCode, sizeof(app.luaCode),
+                             "-- auto-generated from Find Writes\n"
+                             "local hit = umf.aob(\"%s\")\n"
+                             "if hit then umf.nop(hit, %d); umf.log(string.format('patched @ %%X', hit))\n"
+                             "else umf.log('pattern not found') end\n",
+                             aob.c_str(), wlen);
+                    app.addlog("AOB from writer @ " + addr_to_module(app, hits[i].rip) + " = " + aob);
+                    app.toast("AOB copied -> Scanner + Lua patch ready");
+                } else {
+                    app.toast("could not rebuild the instruction");
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+NOP cheat")) {
+                int wlen = 0;
+                std::string aob = make_aob_from_rip(app, hits[i].rip, &wlen);
+                if (!aob.empty()) {
+                    Cheat c;
+                    c.kind = 1;
+                    c.mode = 0;
+                    c.freeze = false;
+                    snprintf(c.label, sizeof(c.label), "NOP %s", addr_to_module(app, hits[i].rip).c_str());
+                    snprintf(c.aob, sizeof(c.aob), "%s", aob.c_str());
+                    snprintf(c.value, sizeof(c.value), "%d", wlen);
+                    app.cheats.push_back(c);
+                    app.hotkeysDirty = true;
+                    app.gotoTrainer = true;
+                    app.toast("restart-proof NOP cheat added to Trainer");
+                } else {
+                    app.toast("could not rebuild the instruction");
+                }
             }
             ImGui::PopID();
         }
@@ -1396,10 +1480,11 @@ static void drawRuntime(App& app) {
           "umf.write_i32(addr, 999)\n"
           "umf.log(\"wrote 999, now = \" .. tostring(umf.read_i32(addr)))\n" },
         { "AOB scan -> patch (all-weapon ammo)",
-          "-- Find the shared 'ammo--' instruction and NOP it so NO weapon loses ammo.\n"
-          "local hit = umf.aob(\"29 41 ?? 48 8B\")   -- example: sub [rcx+off], eax\n"
-          "if hit then umf.nop(hit, 3); umf.log(\"patched ammo decrement @ \"..string.format(\"%X\",hit))\n"
-          "else umf.log(\"pattern not found\") end\n" },
+          "-- Get a REAL pattern first: Find Writes -> fire in game -> 'Make AOB'\n"
+          "-- (that fills this in automatically). The pattern below is only a demo.\n"
+          "local hit = umf.aob(\"29 41 ?? 48 8B\")   -- replace with your signature\n"
+          "if hit then umf.nop(hit, 3); umf.log(string.format('patched @ %X', hit))\n"
+          "else umf.log('pattern not found') end\n" },
         { "Hook: force return (god mode)",
           "-- Make a function always return 0 (e.g. TakeDamage / IsDead).\n"
           "local fn = umf.aob(\"48 89 5C 24 08 57 48 83 EC 20\")\n"
@@ -1815,45 +1900,69 @@ static void drawTrainer(App& app) {
             ImGui::InputText("##n", c.label, sizeof(c.label));
             ImGui::TableSetColumnIndex(1);
             char ab[20];
-            snprintf(ab, sizeof(ab), "%llX", (unsigned long long)c.addr);
-            if (ImGui::Selectable(ab)) {
+            snprintf(ab, sizeof(ab), "%llX", (unsigned long long)(c.kind == 1 ? c.rtAddr : c.addr));
+            if (c.kind == 1) {
+                ImGui::TextUnformatted(c.rtApplied ? ab : "AOB");
+            } else if (ImGui::Selectable(ab)) {
                 snprintf(app.hexAddr, sizeof(app.hexAddr), "%s", ab);
                 snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%s", ab);
+                app.pendingTab = "Hex";
             }
             ImGui::TableSetColumnIndex(2);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::Combo("##t", &c.type, types, 6);
+            if (c.kind == 1) {
+                ImGui::TextColored(ImVec4(0.3f, 0.66f, 1.0f, 1), "patch");
+            } else {
+                ImGui::SetNextItemWidth(-1);
+                ImGui::Combo("##t", &c.type, types, 6);
+            }
             ImGui::TableSetColumnIndex(3);
-            ImGui::TextUnformatted(attached ? fmtValueAt(app.target, c.addr, scanTypeOf(c.type)).c_str() : "-");
+            if (c.kind == 1)
+                ImGui::TextColored(c.rtApplied ? ImVec4(0.24f, 0.86f, 0.52f, 1) : ImVec4(0.6f, 0.6f, 0.65f, 1),
+                                   c.rtApplied ? "ON" : "off");
+            else
+                ImGui::TextUnformatted(attached ? fmtValueAt(app.target, c.addr, scanTypeOf(c.type)).c_str() : "-");
             ImGui::TableSetColumnIndex(4);
             ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##v", c.value, sizeof(c.value));
+            ImGui::InputText(c.kind == 1 ? "##noplen" : "##v", c.value, sizeof(c.value));
             ImGui::TableSetColumnIndex(5);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::Combo("##m", &c.mode, modes, 2);
+            if (c.kind == 1) {
+                ImGui::TextDisabled("toggle");
+            } else {
+                ImGui::SetNextItemWidth(-1);
+                ImGui::Combo("##m", &c.mode, modes, 2);
+            }
             ImGui::TableSetColumnIndex(6);
-            if (c.mode == 1) ImGui::BeginDisabled();
+            if (c.mode == 1 && c.kind == 0) ImGui::BeginDisabled();
             ImGui::Checkbox("##f", &c.freeze);
-            if (c.mode == 1) ImGui::EndDisabled();
+            if (c.mode == 1 && c.kind == 0) ImGui::EndDisabled();
             ImGui::TableSetColumnIndex(7);
             int hi = hk_index(c.hotkey);
             ImGui::SetNextItemWidth(-1);
             if (ImGui::Combo("##h", &hi, hks, 13)) { c.hotkey = hk_vk(hi); app.hotkeysDirty = true; }
             ImGui::TableSetColumnIndex(8);
-            if (ImGui::SmallButton("Set"))
-                writeTyped(app, c.addr, scanTypeOf(c.type), strtod(c.value, nullptr));
-            ImGui::SameLine();
+            if (c.kind == 0) {
+                if (ImGui::SmallButton("Set"))
+                    writeTyped(app, c.addr, scanTypeOf(c.type), strtod(c.value, nullptr));
+                ImGui::SameLine();
+            }
             // Note editor: "i" (filled if a note exists) opens a small popup.
             if (ImGui::SmallButton(c.note[0] ? "i*" : "i")) ImGui::OpenPopup("note");
             if (ImGui::IsItemHovered() && c.note[0]) ImGui::SetTooltip("%s", c.note);
             if (ImGui::BeginPopup("note")) {
                 ImGui::TextDisabled("Tip shown in the trainer (e.g. game caps this at 60):");
-                ImGui::SetNextItemWidth(320);
+                ImGui::SetNextItemWidth(340);
                 ImGui::InputText("##note", c.note, sizeof(c.note));
-                const char* fz[] = { "Locked (exact)", "No less than (floor)", "No more than (cap)" };
-                ImGui::SetNextItemWidth(320);
-                ImGui::Combo("freeze mode", &c.freezeMode, fz, 3);
-                ImGui::TextDisabled("Floor keeps HP/ammo from dropping below Value but lets it rise.");
+                if (c.kind == 1) {
+                    ImGui::TextDisabled("AOB pattern (NOP %s bytes at the match):", c.value);
+                    ImGui::SetNextItemWidth(340);
+                    ImGui::InputText("##aob", c.aob, sizeof(c.aob));
+                    ImGui::TextDisabled("Restart-proof: the pattern is re-found each session, then NOP'd.");
+                } else {
+                    const char* fz[] = { "Locked (exact)", "No less than (floor)", "No more than (cap)" };
+                    ImGui::SetNextItemWidth(340);
+                    ImGui::Combo("freeze mode", &c.freezeMode, fz, 3);
+                    ImGui::TextDisabled("Floor keeps HP/ammo from dropping below Value but lets it rise.");
+                }
                 ImGui::EndPopup();
             }
             ImGui::SameLine();
@@ -2033,8 +2142,14 @@ static void drawToasts(App& app) {
 static void drawUI(App& app) {
     if (app.rt.connected()) app.rt.pump();
     if (app.target.attached()) {
-        for (auto& c : app.cheats)
-            if (c.mode == 0 && c.freeze) apply_freeze(app, c);
+        for (auto& c : app.cheats) {
+            if (c.kind == 1) {   // AOB code patch: arm/revert on freeze-state change
+                if (c.freeze && !c.rtApplied) hx::apply_patch_cheat(app.target, c, true);
+                else if (!c.freeze && c.rtApplied) hx::apply_patch_cheat(app.target, c, false);
+            } else if (c.mode == 0 && c.freeze) {
+                apply_freeze(app, c);
+            }
+        }
         for (auto& w : app.watches)
             if (w.freeze) apply_freeze(app, w);
     }
