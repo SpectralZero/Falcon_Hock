@@ -247,6 +247,12 @@ struct App {
     int structRows = 16;
     int structStep = 8;          // bytes per row
 
+    // modules: selected module + its exports
+    uintptr_t modSel = 0;
+    std::string modSelName;
+    std::vector<hx::Target::ExportEntry> modExports;
+    char modFilter[64] = "";
+
     // find-what-writes
     hx::DebugWatch watch;
     char watchAddr[32] = "";
@@ -934,8 +940,9 @@ static void drawMemoryMap(App& app) {
 static void drawModules(App& app) {
     if (ImGui::Button("Refresh")) app.modules = app.target.modules();
     ImGui::SameLine();
-    ImGui::TextDisabled("%zu modules", app.modules.size());
-    ImGui::BeginChild("mods", ImVec2(0, 0), true);
+    ImGui::TextDisabled("%zu modules - click one to list its exported functions", app.modules.size());
+
+    ImGui::BeginChild("mods", ImVec2(0, 220), true);
     if (ImGui::BeginTable("mod", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupColumn("Module");
         ImGui::TableSetupColumn("Base");
@@ -945,16 +952,52 @@ static void drawModules(App& app) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::PushID((int)m.base);
-            if (ImGui::Selectable(w2u(m.name).c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
-                snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)m.base);
-                snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)m.base);
-                app.pendingTab = "Hex";
+            if (ImGui::Selectable(w2u(m.name).c_str(), app.modSel == m.base, ImGuiSelectableFlags_SpanAllColumns)) {
+                app.modSel = m.base;
+                app.modSelName = w2u(m.name);
+                app.modExports = app.target.module_exports(m.base);
+                app.addlog("module " + app.modSelName + ": " + std::to_string(app.modExports.size()) + " exports");
             }
             ImGui::PopID();
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%016llX", (unsigned long long)m.base);
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("%llu KB", (unsigned long long)(m.size / 1024));
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+
+    if (!app.modSel) { ImGui::TextDisabled("No module selected."); return; }
+    ImGui::Text("Exports of %s (%zu)", app.modSelName.c_str(), app.modExports.size());
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##expf", "filter functions", app.modFilter, sizeof(app.modFilter));
+    if (app.modExports.empty())
+        ImGui::TextDisabled("No name exports (or headers unreadable).");
+    ImGui::BeginChild("exports", ImVec2(0, 0), true);
+    if (ImGui::BeginTable("exp", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Function");
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 150);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableHeadersRow();
+        std::string f = lower(app.modFilter);
+        int shown = 0;
+        for (size_t i = 0; i < app.modExports.size() && shown < 2000; ++i) {
+            const auto& e = app.modExports[i];
+            if (!f.empty() && lower(e.name).find(f) == std::string::npos) continue;
+            ++shown;
+            ImGui::TableNextRow();
+            ImGui::PushID((int)i);
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(e.name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%016llX", (unsigned long long)e.addr);
+            ImGui::TableSetColumnIndex(2);
+            if (ImGui::SmallButton("Disasm")) { snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)e.addr); app.pendingTab = "Disasm"; }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Hex")) { snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)e.addr); app.pendingTab = "Hex"; }
+            ImGui::PopID();
         }
         ImGui::EndTable();
     }
@@ -2079,12 +2122,12 @@ static void drawHelp(App& app) {
     item("Trainer", "Your saved cheats. Each has a value, a Mode (Toggle = hotkey flips Freeze on/off for god mode; Set once = hotkey writes the value one time), a Freeze lock, and a Hotkey (F1-F12) that works while in-game. Save/Load writes a .hexforge file next to the exe. 'Export Trainer (.exe)' bundles the table into a single shareable program that auto-finds the game by name.");
     item("Pointer Scan", "Find a permanent path (module+offsets) to an address so it survives game restarts. Fill the target address (click a Scanner result first), pick a preset, Scan. The 'resolves' column revalidates each path live.");
     item("Find Writes", "Becomes the game's debugger and arms a CPU hardware breakpoint to catch the exact instructions that write/read an address. This is how you find shared code (e.g. the ammo-decrement that hits every weapon) to NOP in Disasm. Click Stop to detach cleanly.");
-    item("Disasm", "Show the CPU instructions at an address (Zydis). Right-click an instruction to NOP/patch it (with one-click Revert) - the basis of all-weapon/god-mode cheats.");
-    item("Hex", "Raw bytes at an address (hex + text). Tick 'Live' to re-read every frame - bytes that just changed flash red, and the Data Inspector shows the bytes as int/float/double at once. Click a byte to edit it. This is how you tell a steady value (health, ammo) from one that updates constantly (position, timers).");
+    item("Disasm", "CPU instructions at an address (Zydis). Auto-updates when you jump here from elsewhere. Double-click (or right-click Follow) a jump/call to navigate, '< Back' returns. Right-click to NOP/patch (with Revert), Copy as AOB, Show in Hex, or Watch who writes.");
+    item("Hex", "Raw bytes at an address. Pick a view size (256 B..4 KB), page with the arrows or mouse wheel. Tick 'Live' to re-read every frame - changed bytes flash red; the Data Inspector shows int/float/double. Click a byte to edit it. Unmapped rows show ??.");
     item("Struct", "Shows memory at a base address as a live struct (offset, int, float, pointer). Great for mapping an object you found via pointer scan.");
     item("Watch", "Pin addresses to see their values live and freeze them, without building a trainer. Right-click a Scanner result -> Add to Watch.");
     item("Memory Map", "All memory regions of the target with protection (RW-, R-X...). Click a region to jump to it in Hex.");
-    item("Modules", "Loaded DLLs with base address + size. Click to send the base to Hex.");
+    item("Modules", "Loaded DLLs with base + size. Click a module to list its exported functions (filterable); each export has Disasm/Hex buttons - the fastest way to find a function to hook or patch.");
     item("Runtime", "Only after Inject runtime: talk to the engine over its pipe - mitigations, hook/mod lists, and sandboxed Lua, with a live log. Lua now has read/write/aob/nop/hook so you can script reload-safe and all-weapon cheats (see snippets).");
     item("Log", "What the tool did. A full copy is also written to hexforge.log next to the exe. Crashes write hexforge-crash.dmp.");
     ImGui::Separator();

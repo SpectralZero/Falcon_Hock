@@ -615,6 +615,43 @@ size_t Target::string_scan(const std::string& needle, bool utf16, bool writable_
     return aob_scan(pat, mask, writable_only, cancel, progress);
 }
 
+std::vector<Target::ExportEntry> Target::module_exports(uintptr_t base) const {
+    std::vector<ExportEntry> out;
+    if (!h_ || !base) return out;
+    IMAGE_DOS_HEADER dos;
+    if (!read(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE) return out;
+    IMAGE_NT_HEADERS64 nt;
+    if (!read(base + dos.e_lfanew, &nt, sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE) return out;
+    IMAGE_DATA_DIRECTORY dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!dir.VirtualAddress || !dir.Size) return out;
+    IMAGE_EXPORT_DIRECTORY exp;
+    if (!read(base + dir.VirtualAddress, &exp, sizeof(exp))) return out;
+
+    uint32_t nNames = exp.NumberOfNames;
+    uint32_t nFuncs = exp.NumberOfFunctions;
+    if (nNames > 65535) nNames = 65535;
+    if (nFuncs > 65535) nFuncs = 65535;
+    std::vector<uint32_t> nameRvas(nNames), funcRvas(nFuncs);
+    std::vector<uint16_t> ords(nNames);
+    if (nNames && !read(base + exp.AddressOfNames, nameRvas.data(), nNames * 4)) return out;
+    if (nNames && !read(base + exp.AddressOfNameOrdinals, ords.data(), nNames * 2)) return out;
+    if (nFuncs && !read(base + exp.AddressOfFunctions, funcRvas.data(), nFuncs * 4)) return out;
+
+    auto read_name = [&](uintptr_t a) -> std::string {
+        char nm[192];
+        for (size_t len = 128; len >= 16; len -= 16)
+            if (read(a, nm, len)) { nm[len - 1] = 0; return std::string(nm); }
+        return "";
+    };
+    out.reserve(nNames);
+    for (uint32_t i = 0; i < nNames; ++i) {
+        uint16_t ord = ords[i];
+        uint32_t frva = (ord < funcRvas.size()) ? funcRvas[ord] : 0;
+        out.push_back({ read_name(base + nameRvas[i]), base + frva, frva });
+    }
+    return out;
+}
+
 uintptr_t Target::aob_find_first(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
                                  bool writable_only) const {
     if (!h_ || pattern.empty()) return 0;

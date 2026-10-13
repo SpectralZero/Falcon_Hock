@@ -102,6 +102,10 @@ public:
     uintptr_t aob_find_first(const std::vector<uint8_t>& pattern, const std::vector<bool>& mask,
                              bool writable_only) const;
 
+    // Parsed export of a loaded module (for the Modules tab / hook targets).
+    struct ExportEntry { std::string name; uintptr_t addr; uint32_t rva; };
+    std::vector<ExportEntry> module_exports(uintptr_t module_base) const;
+
     void clear_scan();
     ScanType scan_type() const { return stype_; }
 
