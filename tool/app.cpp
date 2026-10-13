@@ -212,13 +212,16 @@ struct App {
     std::atomic<float> scanProgress{0.0f};
 
     char hexAddr[32] = "";
-    uint8_t hexBuf[256] = {};
-    uint8_t hexPrev[256] = {};
+    uint8_t hexBuf[4096] = {};
+    uint8_t hexPrev[4096] = {};
+    bool hexRowOk[256] = {};     // readability per 16-byte row
     bool hexHasPrev = false;
     bool hexAuto = false;
     bool hexValid = false;
+    int hexBytes = 512;          // bytes shown (multiple of 16)
     int hexSel = -1;             // selected byte offset for editing
     char hexEditByte[8] = "";
+    uintptr_t hexBase = 0;       // base address currently shown
 
     // pointer scanner
     char ptrAddr[32] = "";
@@ -231,6 +234,9 @@ struct App {
     char disasmAddr[32] = "";
     std::vector<std::string> disasmLines;
     std::vector<std::pair<uintptr_t, int>> disasmMeta;   // (addr, length) per line
+    std::vector<uintptr_t> disasmTarget;                 // branch target per line (0 = none)
+    std::vector<std::string> disasmHistory;              // back-navigation stack
+    uintptr_t disasmLast = 0;                            // last address disassembled
 
     // code patches (for revert)
     struct Patch { uintptr_t addr; std::vector<uint8_t> orig; std::string desc; };
@@ -758,49 +764,62 @@ static void drawDataInspector(uintptr_t base, const uint8_t* b) {
 }
 
 static void drawHex(App& app) {
-    ImGui::SetNextItemWidth(220);
-    ImGui::InputTextWithHint("##addr", "address (hex, e.g. 7FF6...)", app.hexAddr, sizeof(app.hexAddr));
-    ImGui::SameLine();
     bool attached = app.target.attached();
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("##addr", app.hexAddr, sizeof(app.hexAddr));
+    ImGui::SameLine();
     uintptr_t base = (uintptr_t)strtoull(app.hexAddr, nullptr, 16);
+    auto set_base = [&](uintptr_t b) { snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)b); app.hexHasPrev = false; };
     if (!attached) ImGui::BeginDisabled();
-    if (ImGui::Button("Read")) {
-        app.hexValid = base && app.target.read(base, app.hexBuf, sizeof(app.hexBuf));
-        app.hexHasPrev = false;
-        if (!app.hexValid) app.addlog("read failed @ " + std::string(app.hexAddr));
-    }
+    if (ImGui::Button("Go")) app.hexHasPrev = false;
     ImGui::SameLine();
     ImGui::Checkbox("Live", &app.hexAuto);
+    ImGui::SameLine();
+    const char* sizes[] = { "256 B", "512 B", "1 KB", "2 KB", "4 KB" };
+    int si = app.hexBytes <= 256 ? 0 : app.hexBytes <= 512 ? 1 : app.hexBytes <= 1024 ? 2 : app.hexBytes <= 2048 ? 3 : 4;
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::Combo("##size", &si, sizes, 5)) {
+        static const int szv[5] = { 256, 512, 1024, 2048, 4096 };
+        app.hexBytes = szv[si];
+    }
+    ImGui::SameLine();
+    if (ImGui::ArrowButton("##pgup", ImGuiDir_Up)) set_base(base >= (uintptr_t)app.hexBytes ? base - app.hexBytes : 0);
+    ImGui::SameLine();
+    if (ImGui::ArrowButton("##pgdn", ImGuiDir_Down)) set_base(base + app.hexBytes);
     if (!attached) ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("Live re-reads every frame; bytes that changed since last frame turn red.");
+    ImGui::TextDisabled("wheel/arrows page; Live flashes changed bytes red");
 
-    // Live refresh: snapshot previous bytes, read fresh, diff for highlighting.
-    if (app.hexAuto && attached && base) {
-        memcpy(app.hexPrev, app.hexBuf, sizeof(app.hexBuf));
-        app.hexHasPrev = app.hexValid;
-        app.hexValid = app.target.read(base, app.hexBuf, sizeof(app.hexBuf));
+    int rows = app.hexBytes / 16;
+    if (rows > 256) rows = 256;
+
+    // Robust per-row read: a row that straddles an unmapped page just shows '??'
+    // instead of failing the whole view (so paging past region ends is safe).
+    app.hexValid = false;
+    if (attached && base) {
+        if (app.hexHasPrev) memcpy(app.hexPrev, app.hexBuf, sizeof(app.hexBuf));
+        for (int r = 0; r < rows; ++r) {
+            bool ok = app.target.read(base + r * 16, app.hexBuf + r * 16, 16);
+            app.hexRowOk[r] = ok;
+            if (!ok) memset(app.hexBuf + r * 16, 0, 16);
+            if (ok) app.hexValid = true;
+        }
+        app.hexHasPrev = true;
     }
 
     ImGui::Separator();
     if (app.hexValid) {
         drawDataInspector(base, app.hexBuf);
-        // Byte editor for the selected cell.
-        if (app.hexSel >= 0 && app.hexSel < 256) {
+        if (app.hexSel >= 0 && app.hexSel < app.hexBytes) {
             ImGui::SetNextItemWidth(60);
-            ImGui::InputText("##edb", app.hexEditByte, sizeof(app.hexEditByte),
-                             ImGuiInputTextFlags_CharsHexadecimal);
+            ImGui::InputText("##edb", app.hexEditByte, sizeof(app.hexEditByte), ImGuiInputTextFlags_CharsHexadecimal);
             ImGui::SameLine();
             if (ImGui::Button("Write byte")) {
                 uint8_t v = (uint8_t)strtoul(app.hexEditByte, nullptr, 16);
-                if (app.target.write(base + app.hexSel, &v, 1)) {
-                    app.hexBuf[app.hexSel] = v;
-                    app.toast("byte written");
-                }
+                if (app.target.write(base + app.hexSel, &v, 1)) { app.hexBuf[app.hexSel] = v; app.toast("byte written"); }
             }
             ImGui::SameLine();
-            ImGui::TextDisabled("editing +%X (%016llX). Click a byte below to select.",
-                                app.hexSel, (unsigned long long)(base + app.hexSel));
+            ImGui::TextDisabled("editing +%X (%016llX)", app.hexSel, (unsigned long long)(base + app.hexSel));
         } else {
             ImGui::TextDisabled("Click any byte below to edit it.");
         }
@@ -808,13 +827,27 @@ static void drawHex(App& app) {
     }
 
     ImGui::BeginChild("hexdump", ImVec2(0, 0), true);
+    // Mouse wheel pages through memory when hovering the dump.
+    if (attached && ImGui::IsWindowHovered()) {
+        float w = ImGui::GetIO().MouseWheel;
+        if (w != 0) {
+            int delta = (int)(-w) * 16 * 3;   // 3 rows per notch
+            uintptr_t nb = (delta < 0 && base < (uintptr_t)(-delta)) ? 0 : base + delta;
+            set_base(nb);
+        }
+    }
     if (app.hexValid) {
         const ImVec4 white(0.85f, 0.86f, 0.9f, 1.0f);
         const ImVec4 red(1.0f, 0.33f, 0.33f, 1.0f);
         const ImVec4 dim(0.5f, 0.52f, 0.58f, 1.0f);
-        for (int row = 0; row < 16; ++row) {
+        for (int row = 0; row < rows; ++row) {
             int off = row * 16;
             ImGui::TextColored(dim, "%016llX ", (unsigned long long)(base + off));
+            if (!app.hexRowOk[row]) {
+                ImGui::SameLine(0, 6);
+                ImGui::TextColored(dim, "?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ??   (unmapped)");
+                continue;
+            }
             for (int i = 0; i < 16; ++i) {
                 ImGui::SameLine(0, 6);
                 int idx = off + i;
@@ -841,7 +874,7 @@ static void drawHex(App& app) {
             ImGui::TextColored(dim, "%s", ascii);
         }
     } else {
-        ImGui::TextDisabled("Enter an address and press Read (attach a target first). Tip: click a Scanner result to fill this. Find bytes/strings on the Scanner tab (AOB / Text).");
+        ImGui::TextDisabled("Enter an address and press Go (attach a target first). Tip: click a Scanner result to fill this. Find bytes/strings on the Scanner tab (AOB / Text).");
     }
     ImGui::EndChild();
 }
@@ -1025,54 +1058,82 @@ static void revert_patch(App& app, size_t idx) {
     app.patches.erase(app.patches.begin() + idx);
 }
 
-static void drawDisasm(App& app) {
-    bool attached = app.target.attached();
-    ImGui::SetNextItemWidth(220);
-    ImGui::InputTextWithHint("##daddr", "address (hex)", app.disasmAddr, sizeof(app.disasmAddr));
-    ImGui::SameLine();
-    if (!attached) ImGui::BeginDisabled();
-    if (ImGui::Button("Disassemble")) {
-        uintptr_t a = (uintptr_t)strtoull(app.disasmAddr, nullptr, 16);
-        app.disasmLines.clear();
-        app.disasmMeta.clear();
-        if (a) {
-            uint8_t code[256];
-            if (app.target.read(a, code, sizeof(code))) {
-                ZydisDecoder dec;
-                ZydisFormatter fmt;
-                ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
-                ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
-                size_t off = 0;
-                for (int i = 0; i < 40 && off < sizeof(code); ++i) {
-                    ZydisDecodedInstruction ins;
-                    ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
-                    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, code + off, sizeof(code) - off, &ins, ops)))
-                        break;
-                    char text[256];
-                    ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible,
-                                                    text, sizeof(text), a + off, ZYAN_NULL);
-                    std::string bytes;
-                    for (int b = 0; b < ins.length; ++b) {
-                        char hb[8];
-                        snprintf(hb, sizeof(hb), "%02X ", code[off + b]);
-                        bytes += hb;
-                    }
-                    char line[400];
-                    snprintf(line, sizeof(line), "%016llX  %-24s %s", (unsigned long long)(a + off),
-                             bytes.c_str(), text);
-                    app.disasmLines.push_back(line);
-                    app.disasmMeta.push_back({a + off, ins.length});
-                    off += ins.length;
-                }
-                if (app.disasmLines.empty()) app.addlog("disasm: could not decode @ " + std::string(app.disasmAddr));
-            } else {
-                app.addlog("disasm: read failed @ " + std::string(app.disasmAddr));
+// Decode ~48 instructions at `a`, capturing per-line address, length, and the
+// absolute target of any relative branch/call (for click-to-follow).
+static void disassemble_at(App& app, uintptr_t a) {
+    app.disasmLines.clear();
+    app.disasmMeta.clear();
+    app.disasmTarget.clear();
+    app.disasmLast = a;
+    snprintf(app.disasmAddr, sizeof(app.disasmAddr), "%llX", (unsigned long long)a);
+    if (!a || !app.target.attached()) return;
+    uint8_t code[256];
+    size_t have = 0;
+    for (size_t chunk = 256; chunk >= 16; chunk -= 16)
+        if (app.target.read(a, code, chunk)) { have = chunk; break; }
+    if (!have) { app.addlog("disasm: read failed @ " + std::string(app.disasmAddr)); return; }
+    ZydisDecoder dec;
+    ZydisFormatter fmt;
+    ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+    ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+    size_t off = 0;
+    for (int i = 0; i < 48 && off < have; ++i) {
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, code + off, have - off, &ins, ops))) break;
+        char text[256];
+        ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible,
+                                        text, sizeof(text), a + off, ZYAN_NULL);
+        std::string bytes;
+        for (int b = 0; b < ins.length; ++b) {
+            char hb[8];
+            snprintf(hb, sizeof(hb), "%02X ", code[off + b]);
+            bytes += hb;
+        }
+        char line[400];
+        snprintf(line, sizeof(line), "%016llX  %-22s %s", (unsigned long long)(a + off), bytes.c_str(), text);
+        uintptr_t tgt = 0;
+        for (int k = 0; k < ins.operand_count_visible; ++k) {
+            if (ops[k].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && ops[k].imm.is_relative) {
+                ZyanU64 abs = 0;
+                if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&ins, &ops[k], a + off, &abs))) tgt = (uintptr_t)abs;
+                break;
             }
         }
+        app.disasmLines.push_back(line);
+        app.disasmMeta.push_back({a + off, ins.length});
+        app.disasmTarget.push_back(tgt);
+        off += ins.length;
     }
+}
+
+static void drawDisasm(App& app) {
+    bool attached = app.target.attached();
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("##daddr", app.disasmAddr, sizeof(app.disasmAddr));
+    bool addrActive = ImGui::IsItemActive();
+    ImGui::SameLine();
+    if (!attached) ImGui::BeginDisabled();
+    if (ImGui::Button("Disassemble")) disassemble_at(app, (uintptr_t)strtoull(app.disasmAddr, nullptr, 16));
+    ImGui::SameLine();
+    bool canBack = !app.disasmHistory.empty();
+    if (!canBack) ImGui::BeginDisabled();
+    if (ImGui::Button("< Back")) {
+        std::string a = app.disasmHistory.back();
+        app.disasmHistory.pop_back();
+        disassemble_at(app, (uintptr_t)strtoull(a.c_str(), nullptr, 16));
+    }
+    if (!canBack) ImGui::EndDisabled();
     if (!attached) ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("right-click an instruction to NOP / patch");
+    ImGui::TextDisabled("click a jump/call target to follow; right-click to NOP / copy");
+
+    // Auto-disassemble when the address was set elsewhere (navigation), but not
+    // while the user is typing in the box.
+    if (attached && !addrActive) {
+        uintptr_t cur = (uintptr_t)strtoull(app.disasmAddr, nullptr, 16);
+        if (cur && cur != app.disasmLast) disassemble_at(app, cur);
+    }
 
     // Active patches with revert.
     if (!app.patches.empty()) {
@@ -1095,32 +1156,57 @@ static void drawDisasm(App& app) {
 
     ImGui::Separator();
     ImGui::BeginChild("dis", ImVec2(0, 0), true);
+    uintptr_t follow = 0;
     for (size_t i = 0; i < app.disasmLines.size(); ++i) {
         ImGui::PushID((int)i);
-        ImGui::Selectable(app.disasmLines[i].c_str());
+        uintptr_t ia = app.disasmMeta[i].first;
+        int ilen = app.disasmMeta[i].second;
+        uintptr_t tgt = app.disasmTarget[i];
+        if (ImGui::Selectable(app.disasmLines[i].c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
+            if (tgt && ImGui::IsMouseDoubleClicked(0)) follow = tgt;
+        if (tgt) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 0.66f, 1.0f, 1), "-> %llX", (unsigned long long)tgt);
+        }
         if (attached && ImGui::BeginPopupContextItem("insn")) {
-            uintptr_t ia = app.disasmMeta[i].first;
-            int ilen = app.disasmMeta[i].second;
+            if (tgt && ImGui::MenuItem("Follow target")) follow = tgt;
             if (ImGui::MenuItem("NOP this instruction")) {
                 std::vector<uint8_t> nops(ilen, 0x90);
                 char d[64];
                 snprintf(d, sizeof(d), "NOP %016llX (%d)", (unsigned long long)ia, ilen);
                 apply_patch(app, ia, nops, d);
             }
+            if (ImGui::MenuItem("Copy as AOB")) {
+                uint8_t b[16] = {};
+                if (ilen > 0 && ilen <= 16 && app.target.read(ia, b, ilen)) {
+                    std::string aob;
+                    for (int k = 0; k < ilen; ++k) { char hb[4]; snprintf(hb, sizeof(hb), "%02X ", b[k]); aob += hb; }
+                    while (!aob.empty() && aob.back() == ' ') aob.pop_back();
+                    ImGui::SetClipboardText(aob.c_str());
+                    snprintf(app.aobText, sizeof(app.aobText), "%s", aob.c_str());
+                    app.toast("instruction AOB copied + set in Scanner");
+                }
+            }
             if (ImGui::MenuItem("Copy address")) {
                 char ab[20];
                 snprintf(ab, sizeof(ab), "%llX", (unsigned long long)ia);
                 ImGui::SetClipboardText(ab);
             }
-            if (ImGui::MenuItem("Watch who writes here")) {
-                snprintf(app.watchAddr, sizeof(app.watchAddr), "%llX", (unsigned long long)ia);
-            }
+            if (ImGui::MenuItem("Show in Hex")) { snprintf(app.hexAddr, sizeof(app.hexAddr), "%llX", (unsigned long long)ia); app.pendingTab = "Hex"; }
+            if (ImGui::MenuItem("Watch who writes here")) snprintf(app.watchAddr, sizeof(app.watchAddr), "%llX", (unsigned long long)ia);
             ImGui::EndPopup();
         }
         ImGui::PopID();
     }
     if (app.disasmLines.empty()) ImGui::TextDisabled("Enter an address and Disassemble (attached target).");
     ImGui::EndChild();
+
+    if (follow) {
+        char cur[20];
+        snprintf(cur, sizeof(cur), "%llX", (unsigned long long)app.disasmLast);
+        app.disasmHistory.push_back(cur);
+        disassemble_at(app, follow);
+    }
 }
 
 static std::string addr_to_module(App& app, uintptr_t a) {
