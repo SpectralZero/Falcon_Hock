@@ -181,7 +181,14 @@ Ordered by impact. This is the "don't make me list features" backlog, drawn from
 
 ---
 
-## 9. Changelog — latest pass
+## 9. Changelog — latest pass (TEST_REPORT follow-up)
+- **Multi-threaded scanner** (work-stealing pool, one worker per core, 16 MB reads) + first-byte `memchr` skip for AOB. Targets the 26-minute AOB/string scans (TEST_REPORT #1, #2).
+- **UX papercuts** (#3, #4, #5): "Browse in Hex", Memory-Map region click, and Modules rows auto-switch to Hex; Modules rows are clickable; horizontal-scroll safety net so no widget goes off-screen.
+- **Pointer scanner fixed** (#6): index only real pointers (values in committed memory) + 8M cap, so it reaches module space and returns chains on 64-bit games.
+- **Find Writes → real AOB** (#8): "Make AOB" rebuilds the writing instruction's signature (Zydis) and pre-fills a working Lua patch; "+NOP cheat" adds a restart-proof patch straight to the Trainer.
+- **Restart-proof NOP cheats** (#9): new AOB code-patch cheat kind in the Trainer + exported trainer; re-finds the pattern each session and NOPs it (ASLR-proof).
+
+## 9a. Changelog — injection pass
 - **Injection fixed (was broken):** `Inject runtime` + `Connect` now work. Root causes were (a) the runtime's dependency DLLs (`Zydis.dll`, `lua.dll`, CRT) weren't on the target's search path, and (b) `DllMain` never started anything. Fixes: `inject_dll` adds the tool dir to the target's DLL search path then runs a new exported `umf_runtime_start` (boots logging + IPC pipe); CMake copies the CRT DLLs next to `umf_runtime.dll`. See LUA_DEMO.md §12.
 - **Return-override hook, no code (P0#4):** Runtime tab "Quick hook (force return)" box — enter address + return value → god mode / all-weapon with one click (builds a `umf.hook` call).
 - **Export options (P3#19):** author + version baked into the exported trainer and shown in its footer.
@@ -213,7 +220,7 @@ Ordered by impact. This is the "don't make me list features" backlog, drawn from
 
 **Known limitations today**
 - **Find Writes** makes the tool the game's debugger — use only on offline/single-player targets; never on anti-cheat-protected online games.
-- Exported trainers use fixed addresses unless you back them with a pointer path or an AOB/Lua cheat; a game update can move a raw address.
+- Exported trainers support both raw-address freezes and **AOB code-patch cheats** (restart-proof). Raw-address freezes still move on game updates; prefer an AOB/NOP cheat or a pointer path for permanence.
 - No full visual hook manager with live argument inspection yet (basic install/list + Lua hooks exist); no mod-packaging UI; string search has no replace-all.
 - Brand icons are clean drawn glyphs, not official PNG logos (drop-in TODO).
 - 32-bit targets: the tool is x64; reading x86 processes works for data, but code features assume x64.
